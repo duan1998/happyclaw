@@ -18,7 +18,7 @@ import {
 import type { FeishuConnectionConfig } from './feishu.js';
 import type { TelegramConnectionConfig } from './telegram.js';
 import type { QQConnectionConfig } from './qq.js';
-import type { WeChatConnectionConfig } from './wechat.js';
+import type { WeChatConnectionConfig, WeChatStreamingSession } from './wechat.js';
 import type { StreamingCardController } from './feishu-streaming-card.js';
 import { getRegisteredGroup, getJidsByFolder } from './db.js';
 import { logger } from './logger.js';
@@ -229,6 +229,22 @@ class IMConnectionManager {
     const channel = this.findChannelForJid(jid, channelType);
     if (channel?.createStreamingSession) {
       return channel.createStreamingSession(chatId, onCardCreated);
+    }
+    return undefined;
+  }
+
+  /**
+   * Create a WeChat streaming session for typewriter effect.
+   * Returns undefined for non-WeChat channels.
+   */
+  createWeChatStreamingSession(jid: string): WeChatStreamingSession | undefined {
+    const channelType = getChannelType(jid);
+    if (channelType !== 'wechat') return undefined;
+
+    const chatId = extractChatId(jid);
+    const channel = this.findChannelForJid(jid, channelType);
+    if (channel && 'createWeChatStreamingSession' in channel) {
+      return (channel as ReturnType<typeof createWeChatChannel>).createWeChatStreamingSession(chatId);
     }
     return undefined;
   }
@@ -458,6 +474,7 @@ class IMConnectionManager {
         chatJid: string,
       ) => { effectiveJid: string; agentId: string | null } | null;
       onAgentMessage?: (baseChatJid: string, agentId: string) => void;
+      onBufUpdate?: (newBuf: string) => void;
     },
   ): Promise<boolean> {
     if (!config.botToken || !config.ilinkBotId) {
@@ -482,6 +499,7 @@ class IMConnectionManager {
       resolveGroupFolder: options?.resolveGroupFolder,
       resolveEffectiveChatJid: options?.resolveEffectiveChatJid,
       onAgentMessage: options?.onAgentMessage,
+      onWeChatBufUpdate: options?.onBufUpdate,
     });
   }
 

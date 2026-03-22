@@ -110,6 +110,7 @@ import {
   getUserTelegramConfig,
   getUserQQConfig,
   getUserWeChatConfig,
+  saveUserWeChatConfig,
   getSystemSettings,
   saveUserFeishuConfig,
   saveUserTelegramConfig,
@@ -1990,6 +1991,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     logger.debug({ chatJid }, 'Streaming card session created for Feishu');
   }
 
+  // ── WeChat streaming session (typewriter effect) ──
+  let wechatStreamingSession = imManager.createWeChatStreamingSession(streamingSessionJid);
+  if (wechatStreamingSession) {
+    logger.debug({ chatJid }, 'WeChat streaming session created');
+  }
+
   // ── Dynamic reply route updater ──
   // Allows IPC-injected messages (from web.ts / IM polling) to update the
   // reply routing target without killing the agent process.  This replaces
@@ -2012,8 +2019,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         if (streamingSession.isActive()) streamingSession.dispose();
         unregisterStreamingSession(streamingSessionJid);
       }
+      // Dispose WeChat streaming session too
+      if (wechatStreamingSession?.isActive()) wechatStreamingSession.dispose();
+
       streamingSessionJid = newStreamingJid;
       streamingSession = imManager.createStreamingSession(streamingSessionJid, makeOnCardCreated(streamingSessionJid));
+      wechatStreamingSession = imManager.createWeChatStreamingSession(streamingSessionJid);
       streamingAccumulatedText = '';
       if (streamingSession) {
         registerStreamingSession(streamingSessionJid, streamingSession);
@@ -2098,6 +2109,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           // ── Feed stream events into Feishu streaming card ──
           if (streamingSession) {
             feedStreamEventToCard(streamingSession, result.streamEvent, streamingAccumulatedText);
+          }
+
+          // ── Feed text_delta into WeChat streaming session ──
+          if (wechatStreamingSession?.isActive() && result.streamEvent.eventType === 'text_delta') {
+            wechatStreamingSession.append(streamingAccumulatedText);
           }
 
           // ── 中断时立即保存已输出内容 ──
@@ -2405,6 +2421,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               }
             }
 
+            // ── Complete WeChat streaming session ──
+            let wechatStreamingHandledIM = false;
+            if (wechatStreamingSession?.isActive()) {
+              try {
+                await wechatStreamingSession.complete(text);
+                wechatStreamingHandledIM = true;
+                logger.debug({ chatJid }, 'WeChat streaming completed with final text');
+              } catch (err) {
+                logger.warn(
+                  { err, chatJid },
+                  'WeChat streaming complete failed, falling back to static message',
+                );
+              }
+            }
+
             // ── Rebuild streaming card after compact_partial / overflow_partial ──
             // The completed card was consumed; create a new one so post-compaction
             // tool-call progress remains visible on Feishu (#223).
@@ -2427,13 +2458,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               }
             }
 
+            // Rebuild WeChat streaming session after partial output
+            if (
+              wechatStreamingHandledIM &&
+              (result.sourceKind === 'compact_partial' || result.sourceKind === 'overflow_partial')
+            ) {
+              streamingAccumulatedText = '';
+              wechatStreamingSession = imManager.createWeChatStreamingSession(streamingSessionJid);
+            }
+
             // Skip IM send to the original chatJid when:
             // 1. Streaming card already handled the IM delivery, OR
             // 2. Reply route switched to a different IM channel (the routed IM
             //    path below will deliver to the correct channel instead).
             // Any send_message content is delivered independently via IPC watcher.
             const routeSwitchedAway = directImReply && replySourceImJid !== null && replySourceImJid !== chatJid;
-            const skipImSend = (streamingCardHandledIM && directImReply) || routeSwitchedAway;
+            const skipImSend = ((streamingCardHandledIM || wechatStreamingHandledIM) && directImReply) || routeSwitchedAway;
             // When the container stays alive and processes multiple IPC messages,
             // result.turnId stays the same (set at container start).  If we already
             // saved a reply with this turnId, the INSERT OR REPLACE would overwrite
@@ -2460,7 +2500,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             // if streaming card handled it. send_message content is already
             // forwarded to IM by the IPC watcher's activeImReplyRoutes logic.
             if (replySourceImJid && replySourceImJid !== chatJid) {
-              if (!streamingCardHandledIM) {
+              if (!streamingCardHandledIM && !wechatStreamingHandledIM) {
                 sendImWithFailTracking(replySourceImJid, text, localImagePaths);
               }
             }
@@ -2528,6 +2568,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         }
       }
       unregisterStreamingSession(streamingSessionJid);
+    }
+
+    // ── WeChat streaming cleanup ──
+    if (wechatStreamingSession?.isActive()) {
+      if (hadError || !output || output.status === 'error') {
+        await wechatStreamingSession.abort('处理出错').catch(() => {});
+      } else if (wasInterrupted) {
+        await wechatStreamingSession.abort('已中断').catch(() => {});
+      } else {
+        wechatStreamingSession.dispose();
+      }
     }
 
     // ── 保存中断内容到数据库 + 广播到 Web ──
@@ -5566,6 +5617,53 @@ function handleCardInterrupt(chatJid: string): void {
 }
 
 /**
+ * Debounced WeChat sync-buf persistence (30s delay to avoid high-frequency IO).
+ * Flushed immediately on graceful shutdown.
+ */
+const wechatBufSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const wechatBufPending = new Map<string, string>();
+
+function debouncedSaveWeChatBuf(userId: string, newBuf: string): void {
+  wechatBufPending.set(userId, newBuf);
+  const existing = wechatBufSaveTimers.get(userId);
+  if (existing) clearTimeout(existing);
+  wechatBufSaveTimers.set(
+    userId,
+    setTimeout(() => {
+      wechatBufSaveTimers.delete(userId);
+      wechatBufPending.delete(userId);
+      try {
+        const config = getUserWeChatConfig(userId);
+        if (config) {
+          saveUserWeChatConfig(userId, { ...config, getUpdatesBuf: newBuf });
+        }
+      } catch (err) {
+        logger.warn({ err, userId }, 'Failed to persist WeChat sync buf');
+      }
+    }, 30_000),
+  );
+}
+
+function flushWeChatBufSaves(): void {
+  for (const [userId, timer] of wechatBufSaveTimers.entries()) {
+    clearTimeout(timer);
+    const buf = wechatBufPending.get(userId);
+    if (buf) {
+      try {
+        const config = getUserWeChatConfig(userId);
+        if (config) {
+          saveUserWeChatConfig(userId, { ...config, getUpdatesBuf: buf });
+        }
+      } catch (err) {
+        logger.warn({ err, userId }, 'Failed to flush WeChat sync buf on shutdown');
+      }
+    }
+  }
+  wechatBufSaveTimers.clear();
+  wechatBufPending.clear();
+}
+
+/**
  * Connect IM channels for a specific user via imManager.
  * Reads the user's IM config and connects if enabled.
  */
@@ -5675,6 +5773,9 @@ async function connectUserIMChannels(
         resolveGroupFolder,
         resolveEffectiveChatJid,
         onAgentMessage,
+        onBufUpdate: (newBuf: string) => {
+          debouncedSaveWeChatBuf(userId, newBuf);
+        },
       },
     );
   }
@@ -5917,6 +6018,9 @@ async function main(): Promise<void> {
     // Stop periodic buffer, then persist streaming text to DB + clean buffer files.
     stopStreamingBuffer();
     saveInterruptedStreamingMessages();
+
+    // Flush pending WeChat sync-buf saves before disconnect
+    flushWeChatBufSaves();
 
     // Run cleanup tasks concurrently with a tight timeout
     await Promise.allSettled([
@@ -6190,6 +6294,9 @@ async function main(): Promise<void> {
               resolveEffectiveFolder(chatJid),
             resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
             onAgentMessage: buildOnAgentMessage(),
+            onBufUpdate: (newBuf: string) => {
+              debouncedSaveWeChatBuf(userId, newBuf);
+            },
           },
         );
         logger.info(

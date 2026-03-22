@@ -23,6 +23,7 @@ import {
   createWeChatConnection,
   type WeChatConnection,
   type WeChatConnectionConfig,
+  type WeChatStreamingSession,
 } from './wechat.js';
 import { logger } from './logger.js';
 import {
@@ -61,6 +62,8 @@ export interface IMChannelConnectOpts {
   shouldProcessGroupMessage?: (chatJid: string) => boolean;
   /** 飞书流式卡片按钮中断回调 */
   onCardInterrupt?: (chatJid: string) => void;
+  /** WeChat: long-polling cursor update callback for persistence */
+  onWeChatBufUpdate?: (newBuf: string) => void;
 }
 
 export interface IMChannel {
@@ -431,10 +434,18 @@ export function createQQChannel(config: QQConnectionConfig): IMChannel {
 
 export function createWeChatChannel(
   config: WeChatConnectionConfig,
-): IMChannel {
+): IMChannel & { createWeChatStreamingSession(chatId: string): WeChatStreamingSession | undefined } {
   let inner: WeChatConnection | null = null;
+  let typingTimer: ReturnType<typeof setInterval> | null = null;
 
-  const channel: IMChannel = {
+  function clearTypingTimer(): void {
+    if (typingTimer) {
+      clearInterval(typingTimer);
+      typingTimer = null;
+    }
+  }
+
+  const channel: IMChannel & { createWeChatStreamingSession(chatId: string): WeChatStreamingSession | undefined } = {
     channelType: 'wechat',
 
     async connect(opts: IMChannelConnectOpts): Promise<boolean> {
@@ -448,6 +459,7 @@ export function createWeChatChannel(
           resolveGroupFolder: opts.resolveGroupFolder,
           resolveEffectiveChatJid: opts.resolveEffectiveChatJid,
           onAgentMessage: opts.onAgentMessage,
+          onBufUpdate: opts.onWeChatBufUpdate,
         });
         return inner.isConnected();
       } catch (err) {
@@ -458,6 +470,7 @@ export function createWeChatChannel(
     },
 
     async disconnect(): Promise<void> {
+      clearTypingTimer();
       if (inner) {
         await inner.disconnect();
         inner = null;
@@ -476,12 +489,30 @@ export function createWeChatChannel(
     },
 
     async setTyping(chatId: string, isTyping: boolean): Promise<void> {
-      if (!inner) return;
-      await inner.sendTyping(chatId, isTyping);
+      clearTypingTimer();
+      if (!isTyping || !inner) return;
+
+      // Send immediately, then repeat every 4s (typing indicator expires)
+      const sendAction = async (): Promise<void> => {
+        if (!inner) return;
+        try {
+          await inner.sendTyping(chatId, true);
+        } catch {
+          // best-effort — typing is non-critical
+        }
+      };
+      void sendAction();
+      typingTimer = setInterval(() => {
+        void sendAction();
+      }, 4000);
     },
 
     isConnected(): boolean {
       return inner?.isConnected() ?? false;
+    },
+
+    createWeChatStreamingSession(chatId: string): WeChatStreamingSession | undefined {
+      return inner?.createStreamingSession(chatId);
     },
   };
 

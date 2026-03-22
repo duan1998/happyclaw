@@ -39,6 +39,21 @@ const DEFAULT_LONGPOLL_TIMEOUT_MS = 35000;
 const RECONNECT_MIN_DELAY_MS = 3000;
 const RECONNECT_MAX_DELAY_MS = 60000;
 
+// Session expiry retry (errcode -14)
+const SESSION_RETRY_INITIAL_MS = 60_000; // 60s
+const SESSION_RETRY_MAX_MS = 600_000; // 10min
+const SESSION_RETRY_MAX_ATTEMPTS = 10;
+
+// context_token TTL
+const CONTEXT_TOKEN_TTL = 2 * 60 * 60 * 1000; // 2 hours
+const CONTEXT_TOKEN_CLEANUP_INTERVAL = 30 * 60 * 1000; // 30min
+
+// Typing ticket cache TTL
+const TYPING_TICKET_TTL = 5 * 60 * 1000; // 5min
+
+// Streaming throttle
+const STREAM_THROTTLE_MS = 800;
+
 const IMAGE_MAX_BASE64_SIZE = 5 * 1024 * 1024; // 5 MB for inline base64
 
 const CHANNEL_VERSION = '0.1.0';
@@ -56,7 +71,7 @@ const MESSAGE_ITEM_TYPE_FILE = 4;
 
 // iLink message state
 // const MESSAGE_STATE_NEW = 0;
-// const MESSAGE_STATE_GENERATING = 1;
+const MESSAGE_STATE_GENERATING = 1;
 const MESSAGE_STATE_FINISH = 2;
 
 // errcode for session expired
@@ -82,6 +97,21 @@ export interface WeChatConnectOpts {
     chatJid: string,
   ) => { effectiveJid: string; agentId: string | null } | null;
   onAgentMessage?: (baseChatJid: string, agentId: string) => void;
+  /** Called when long-polling cursor updates — persist for crash recovery */
+  onBufUpdate?: (newBuf: string) => void;
+}
+
+export interface WeChatStreamingSession {
+  /** Append accumulated text (throttled at 800ms intervals) */
+  append(accumulatedText: string): void;
+  /** Send final FINISH message */
+  complete(finalText: string): Promise<void>;
+  /** Abort streaming */
+  abort(reason?: string): Promise<void>;
+  /** Whether the session is still active */
+  isActive(): boolean;
+  /** Clean up resources */
+  dispose(): void;
 }
 
 export interface WeChatConnection {
@@ -95,6 +125,8 @@ export interface WeChatConnection {
   sendTyping(chatId: string, isTyping: boolean): Promise<void>;
   isConnected(): boolean;
   getUpdatesBuf(): string;
+  /** Create a streaming session for typewriter effect */
+  createStreamingSession(chatId: string): WeChatStreamingSession | undefined;
 }
 
 interface WeixinMessage {
@@ -233,9 +265,15 @@ function extractTextContent(items: MessageItem[]): string {
         parts.push('(voice)');
       }
     } else if (item.type === MESSAGE_ITEM_TYPE_FILE) {
-      parts.push(`(file: ${item.file_item?.file_name ?? 'unknown'})`);
+      // Only add placeholder if no CDN media to download (handled by processFileItem)
+      if (!item.file_item?.media?.encrypt_query_param) {
+        parts.push(`(file: ${item.file_item?.file_name ?? 'unknown'})`);
+      }
     } else if (item.type === 5 /* VIDEO */) {
-      parts.push('(video)');
+      // Only add placeholder if no CDN media to download (handled by processVideoItem)
+      if (!item.video_item?.media?.encrypt_query_param) {
+        parts.push('(video)');
+      }
     }
   }
   return parts.join('\n').trim();
@@ -269,8 +307,47 @@ export function createWeChatConnection(
   let connected = false;
   let cancelSleep: (() => void) | null = null;
 
-  // context_token cache: from_user_id -> latest context_token
-  const contextTokenCache = new Map<string, string>();
+  // context_token cache with TTL: from_user_id -> { token, timestamp }
+  interface CachedToken { token: string; timestamp: number; }
+  const contextTokenCache = new Map<string, CachedToken>();
+  let tokenCleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+  function getValidToken(userId: string): string | undefined {
+    const cached = contextTokenCache.get(userId);
+    if (!cached) return undefined;
+    if (Date.now() - cached.timestamp > CONTEXT_TOKEN_TTL) {
+      contextTokenCache.delete(userId);
+      return undefined;
+    }
+    return cached.token;
+  }
+
+  function setToken(userId: string, token: string): void {
+    contextTokenCache.set(userId, { token, timestamp: Date.now() });
+  }
+
+  function startTokenCleanup(): void {
+    tokenCleanupTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [key, cached] of contextTokenCache.entries()) {
+        if (now - cached.timestamp > CONTEXT_TOKEN_TTL) {
+          contextTokenCache.delete(key);
+        }
+      }
+    }, CONTEXT_TOKEN_CLEANUP_INTERVAL);
+    tokenCleanupTimer.unref();
+  }
+
+  function stopTokenCleanup(): void {
+    if (tokenCleanupTimer) {
+      clearInterval(tokenCleanupTimer);
+      tokenCleanupTimer = null;
+    }
+  }
+
+  // Typing ticket cache with TTL
+  interface CachedTypingTicket { ticket: string; timestamp: number; }
+  const typingTicketCache = new Map<string, CachedTypingTicket>();
 
   // Known JIDs — skip redundant storeChatMetadata/onNewChat for repeat messages
   const knownJids = new Set<string>();
@@ -416,6 +493,41 @@ export function createWeChatConnection(
     }
   }
 
+  /**
+   * Send a streaming message update using a persistent clientId.
+   * message_state=GENERATING for intermediate updates, FINISH for final.
+   */
+  async function sendMessageStreamingApi(
+    toUserId: string,
+    contextToken: string,
+    text: string,
+    clientId: string,
+    messageState: typeof MESSAGE_STATE_GENERATING | typeof MESSAGE_STATE_FINISH,
+  ): Promise<void> {
+    const resp = await apiPost<{ ret?: number; errcode?: number; errmsg?: string }>(
+      'ilink/bot/sendmessage',
+      {
+        msg: {
+          to_user_id: toUserId,
+          context_token: contextToken,
+          item_list: text
+            ? [{ type: MESSAGE_ITEM_TYPE_TEXT, text_item: { text } }]
+            : undefined,
+          message_type: MESSAGE_TYPE_BOT,
+          message_state: messageState,
+          client_id: clientId,
+        },
+        base_info: baseInfo(),
+      },
+    );
+
+    if (resp.ret !== undefined && resp.ret !== 0) {
+      throw new Error(
+        `sendMessageStreaming failed: ret=${resp.ret} errcode=${resp.errcode} errmsg=${resp.errmsg ?? ''}`,
+      );
+    }
+  }
+
   async function getTypingTicket(
     ilinkUserId: string,
     contextToken: string,
@@ -537,6 +649,115 @@ export function createWeChatConnection(
     }
   }
 
+  // ─── File Handling ───────────────────────────────────────
+
+  async function processFileItem(
+    item: MessageItem,
+    msgIdentifier: string,
+    groupFolder: string | undefined,
+  ): Promise<{ textPrefix?: string }> {
+    const fileItem = item.file_item;
+    if (!fileItem) return {};
+
+    const media = fileItem.media;
+    const fileName = fileItem.file_name || `file_${msgIdentifier}`;
+
+    if (!media?.encrypt_query_param || !media?.aes_key) {
+      logger.debug('WeChat file missing media or aes_key, skipping download');
+      return {}; // extractTextContent() already adds placeholder for non-CDN files
+    }
+
+    if (!groupFolder) {
+      return {}; // extractTextContent() already adds placeholder
+    }
+
+    try {
+      const buffer = await downloadAndDecryptMedia(
+        media.encrypt_query_param,
+        media.aes_key,
+        cdnBaseUrl,
+      );
+
+      if (!buffer || buffer.length === 0) {
+        logger.warn('WeChat file download returned empty buffer');
+        return { textPrefix: `[文件: ${fileName}]` };
+      }
+
+      if (buffer.length > MAX_FILE_SIZE) {
+        logger.warn(
+          { size: buffer.length, fileName },
+          'WeChat file exceeds max file size, skipping download',
+        );
+        return { textPrefix: `[文件: ${fileName} (超过50MB)]` };
+      }
+
+      const relPath = await saveDownloadedFile(
+        groupFolder,
+        'wechat',
+        fileName,
+        buffer,
+      );
+      return { textPrefix: `[文件: ${relPath}]` };
+    } catch (err) {
+      logger.warn({ err, fileName }, 'WeChat file download/decrypt failed');
+      return { textPrefix: `[文件: ${fileName} (下载失败)]` };
+    }
+  }
+
+  // ─── Video Handling ──────────────────────────────────────
+
+  async function processVideoItem(
+    item: MessageItem,
+    msgIdentifier: string,
+    groupFolder: string | undefined,
+  ): Promise<{ textPrefix?: string }> {
+    const videoItem = item.video_item;
+    if (!videoItem) return {};
+
+    const media = videoItem.media;
+    if (!media?.encrypt_query_param || !media?.aes_key) {
+      logger.debug('WeChat video missing media or aes_key, skipping download');
+      return {}; // extractTextContent() already adds placeholder for non-CDN videos
+    }
+
+    if (!groupFolder) {
+      return {}; // extractTextContent() already adds placeholder
+    }
+
+    try {
+      const buffer = await downloadAndDecryptMedia(
+        media.encrypt_query_param,
+        media.aes_key,
+        cdnBaseUrl,
+      );
+
+      if (!buffer || buffer.length === 0) {
+        logger.warn('WeChat video download returned empty buffer');
+        return { textPrefix: '(video)' };
+      }
+
+      if (buffer.length > MAX_FILE_SIZE) {
+        logger.warn(
+          { size: buffer.length },
+          'WeChat video exceeds max file size, skipping download',
+        );
+        return { textPrefix: '(video: 超过50MB)' };
+      }
+
+      const fileName = `wechat_video_${msgIdentifier}.mp4`;
+      const relPath = await saveDownloadedFile(
+        groupFolder,
+        'wechat',
+        fileName,
+        buffer,
+      );
+      return { textPrefix: `[视频: ${relPath}]` };
+    } catch (err) {
+      logger.warn({ err }, 'WeChat video download/decrypt failed');
+      return { textPrefix: '(video: 下载失败)' };
+    }
+  }
+
   // ─── Message Processing ───────────────────────────────────
 
   async function processMessage(
@@ -562,7 +783,7 @@ export function createWeChatConnection(
 
       // Cache context_token for replies
       if (msg.context_token) {
-        contextTokenCache.set(fromUserId, msg.context_token);
+        setToken(fromUserId, msg.context_token);
       }
 
       const jid = `wechat:${fromUserId}`;
@@ -590,7 +811,7 @@ export function createWeChatConnection(
         try {
           const reply = await opts.onCommand(jid, cmdBody);
           if (reply) {
-            const ct = contextTokenCache.get(fromUserId);
+            const ct = getValidToken(fromUserId);
             if (ct) {
               await sendMessageApi(
                 fromUserId,
@@ -602,7 +823,7 @@ export function createWeChatConnection(
           }
         } catch (err) {
           logger.error({ jid, err }, 'WeChat slash command failed');
-          const ct = contextTokenCache.get(fromUserId);
+          const ct = getValidToken(fromUserId);
           if (ct) {
             await sendMessageApi(fromUserId, ct, '命令执行失败，请稍后重试');
           }
@@ -647,19 +868,47 @@ export function createWeChatConnection(
           }
         }
 
-        // Handle file items — note the path in content
-        for (const item of msg.item_list) {
-          if (item.type === MESSAGE_ITEM_TYPE_FILE && item.file_item) {
-            const fileName = item.file_item.file_name || 'unknown_file';
-            content = `[文件: ${fileName}]\n${content}`.trim();
+        // Handle file items — download content to workspace
+        const fileItems = msg.item_list.filter(
+          (item) => item.type === MESSAGE_ITEM_TYPE_FILE,
+        );
+        if (fileItems.length > 0) {
+          const fileResults = await Promise.allSettled(
+            fileItems.map((item) =>
+              processFileItem(item, msgId.slice(-8), groupFolder),
+            ),
+          );
+          for (const r of fileResults) {
+            if (r.status === 'fulfilled' && r.value.textPrefix) {
+              textPrefixes.push(r.value.textPrefix);
+            }
+          }
+        }
+
+        // Handle video items — download to workspace
+        const videoItems = msg.item_list.filter(
+          (item) => item.type === 5 /* VIDEO */,
+        );
+        if (videoItems.length > 0) {
+          const videoResults = await Promise.allSettled(
+            videoItems.map((item) =>
+              processVideoItem(item, msgId.slice(-8), groupFolder),
+            ),
+          );
+          for (const r of videoResults) {
+            if (r.status === 'fulfilled' && r.value.textPrefix) {
+              textPrefixes.push(r.value.textPrefix);
+            }
           }
         }
 
         if (imageAttachments.length > 0) {
           attachmentsJson = JSON.stringify(imageAttachments);
-          if (textPrefixes.length > 0) {
-            content = `${textPrefixes.join('\n')}\n${content}`.trim();
-          }
+        }
+
+        // Merge text prefixes (image paths, file paths, video paths) into content
+        if (textPrefixes.length > 0) {
+          content = `${textPrefixes.join('\n')}\n${content}`.trim();
         }
 
         if (!content && imageAttachments.length > 0) {
@@ -723,6 +972,8 @@ export function createWeChatConnection(
 
   async function pollLoop(opts: WeChatConnectOpts): Promise<void> {
     let reconnectDelay = RECONNECT_MIN_DELAY_MS;
+    let sessionRetryDelay = SESSION_RETRY_INITIAL_MS;
+    let sessionRetryCount = 0;
 
     while (!stopping) {
       try {
@@ -733,11 +984,24 @@ export function createWeChatConnection(
           longpollTimeoutMs = response.longpolling_timeout_ms;
         }
 
-        // Check for session expiry
+        // Check for session expiry — retry with exponential backoff
         if (response.ret === ERRCODE_SESSION_EXPIRED) {
-          logger.warn('WeChat session expired (errcode -14), stopping poll loop');
-          connected = false;
-          break;
+          sessionRetryCount++;
+          if (sessionRetryCount > SESSION_RETRY_MAX_ATTEMPTS) {
+            logger.error(
+              { retries: sessionRetryCount },
+              'WeChat session expired and max retries exceeded, stopping',
+            );
+            connected = false;
+            break;
+          }
+          logger.warn(
+            { delay: sessionRetryDelay, attempt: sessionRetryCount },
+            'WeChat session expired (errcode -14), retrying after backoff',
+          );
+          await sleep(sessionRetryDelay);
+          sessionRetryDelay = Math.min(sessionRetryDelay * 2, SESSION_RETRY_MAX_MS);
+          continue;
         }
 
         // ret is absent (undefined) when the request succeeds — treat as 0
@@ -753,10 +1017,13 @@ export function createWeChatConnection(
 
         // Reset backoff on success
         reconnectDelay = RECONNECT_MIN_DELAY_MS;
+        sessionRetryCount = 0;
+        sessionRetryDelay = SESSION_RETRY_INITIAL_MS;
 
-        // Update cursor
+        // Update cursor and persist
         if (response.get_updates_buf) {
           currentGetUpdatesBuf = response.get_updates_buf;
+          opts.onBufUpdate?.(currentGetUpdatesBuf);
         }
 
         // Process messages
@@ -798,7 +1065,9 @@ export function createWeChatConnection(
       connected = true;
       msgCache.clear();
       contextTokenCache.clear();
+      typingTicketCache.clear();
       knownJids.clear();
+      startTokenCleanup();
 
       logger.info(
         { baseUrl, ilinkBotId: config.ilinkBotId },
@@ -823,8 +1092,10 @@ export function createWeChatConnection(
       cancelSleep?.();
       cancelSleep = null;
 
+      stopTokenCleanup();
       msgCache.clear();
       contextTokenCache.clear();
+      typingTicketCache.clear();
       knownJids.clear();
       logger.info('WeChat iLink bot disconnected');
     },
@@ -834,10 +1105,9 @@ export function createWeChatConnection(
       text: string,
       _localImagePaths?: string[],
     ): Promise<void> {
-      // chatId is the raw WeChat user ID (prefix already stripped by IM manager)
       const userId = chatId;
 
-      const contextToken = contextTokenCache.get(userId);
+      const contextToken = getValidToken(userId);
       if (!contextToken) {
         logger.warn(
           { chatId },
@@ -862,13 +1132,22 @@ export function createWeChatConnection(
     },
 
     async sendTyping(chatId: string, isTyping: boolean): Promise<void> {
-      // chatId is the raw WeChat user ID (prefix already stripped by IM manager)
       const userId = chatId;
 
-      const contextToken = contextTokenCache.get(userId);
+      const contextToken = getValidToken(userId);
       if (!contextToken) return;
 
-      const ticket = await getTypingTicket(userId, contextToken);
+      // Check typing ticket cache first
+      let ticket: string | null = null;
+      const cached = typingTicketCache.get(userId);
+      if (cached && Date.now() - cached.timestamp < TYPING_TICKET_TTL) {
+        ticket = cached.ticket;
+      } else {
+        ticket = await getTypingTicket(userId, contextToken);
+        if (ticket) {
+          typingTicketCache.set(userId, { ticket, timestamp: Date.now() });
+        }
+      }
       if (!ticket) return;
 
       await sendTypingApi(userId, ticket, isTyping ? 1 : 2);
@@ -880,6 +1159,105 @@ export function createWeChatConnection(
 
     getUpdatesBuf(): string {
       return currentGetUpdatesBuf;
+    },
+
+    createStreamingSession(chatId: string): WeChatStreamingSession | undefined {
+      const contextToken = getValidToken(chatId);
+      if (!contextToken) return undefined;
+
+      const clientId = String(crypto.randomBytes(4).readUInt32BE(0));
+      let state: 'streaming' | 'completed' | 'aborted' = 'streaming';
+      let pendingText = '';
+      let lastSentText = '';
+      let lastSendTime = 0;
+      let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+      let sendChain = Promise.resolve(); // serialize sends to prevent out-of-order delivery
+
+      const doSend = async (text: string, done: boolean): Promise<void> => {
+        const cleaned = markdownToPlainText(text);
+        if (cleaned === lastSentText && !done) return;
+
+        // Always get the latest context_token
+        const ct = getValidToken(chatId) || contextToken;
+        try {
+          await sendMessageStreamingApi(
+            chatId,
+            ct,
+            cleaned,
+            clientId,
+            done ? MESSAGE_STATE_FINISH : MESSAGE_STATE_GENERATING,
+          );
+          lastSentText = cleaned;
+          lastSendTime = Date.now();
+        } catch (err) {
+          logger.warn({ err, chatId, done }, 'WeChat streaming send failed');
+        }
+      };
+
+      const session: WeChatStreamingSession = {
+        append(accumulatedText: string): void {
+          if (state !== 'streaming' || !accumulatedText) return;
+          pendingText = accumulatedText;
+
+          const elapsed = Date.now() - lastSendTime;
+          if (elapsed >= STREAM_THROTTLE_MS) {
+            if (throttleTimer) {
+              clearTimeout(throttleTimer);
+              throttleTimer = null;
+            }
+            sendChain = sendChain.then(() => doSend(pendingText, false)).catch(() => {});
+          } else if (!throttleTimer) {
+            throttleTimer = setTimeout(() => {
+              throttleTimer = null;
+              if (state === 'streaming') {
+                sendChain = sendChain.then(() => doSend(pendingText, false)).catch(() => {});
+              }
+            }, STREAM_THROTTLE_MS - elapsed);
+          }
+        },
+
+        async complete(finalText: string): Promise<void> {
+          if (state !== 'streaming') return;
+          state = 'completed';
+          if (throttleTimer) {
+            clearTimeout(throttleTimer);
+            throttleTimer = null;
+          }
+          // Wait for pending sends, then send FINISH to clear "generating" state
+          await sendChain;
+          await doSend(finalText || lastSentText, true);
+        },
+
+        async abort(reason?: string): Promise<void> {
+          if (state !== 'streaming') return;
+          state = 'aborted';
+          if (throttleTimer) {
+            clearTimeout(throttleTimer);
+            throttleTimer = null;
+          }
+          // Wait for pending sends, then send FINISH with abort info
+          await sendChain.catch(() => {});
+          const abortText = reason
+            ? `${lastSentText}\n\n(${reason})`
+            : lastSentText;
+          if (abortText) {
+            await doSend(abortText, true).catch(() => {});
+          }
+        },
+
+        isActive(): boolean {
+          return state === 'streaming';
+        },
+
+        dispose(): void {
+          if (throttleTimer) {
+            clearTimeout(throttleTimer);
+            throttleTimer = null;
+          }
+        },
+      };
+
+      return session;
     },
   };
 
