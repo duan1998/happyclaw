@@ -17,7 +17,9 @@ export const MOUNT_ALLOWLIST_PATH = path.resolve(
   'config',
   'mount-allowlist.json',
 );
-export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const DATA_DIR = process.env.HAPPYCLAW_DATA_DIR
+  ? path.resolve(process.env.HAPPYCLAW_DATA_DIR)
+  : path.resolve(PROJECT_ROOT, 'data');
 export const STORE_DIR = path.join(DATA_DIR, 'db');
 export const GROUPS_DIR = path.join(DATA_DIR, 'groups');
 export const MAIN_GROUP_FOLDER = 'main';

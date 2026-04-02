@@ -20,12 +20,21 @@
     "win": {
       "target": [
         {
-          "target": "dir",
+          "target": "nsis",
           "arch": ["x64"]
         }
       ],
+      "icon": "icon.png",
       "signAndEditExecutable": false,
       "forceCodeSigning": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "HappyClaw",
+      "artifactName": "HappyClaw-Setup-${version}.${ext}"
     },
     "files": [
       "main.js",

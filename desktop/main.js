@@ -55,22 +55,52 @@ function waitForPort(port, timeout = 20000) {
   });
 }
 
+function getDataDir() {
+  if (isDev) return null;
+  return path.join(app.getPath('userData'), 'data');
+}
+
+function migrateOldData(newDataDir) {
+  const oldDataDir = path.join(process.resourcesPath, 'app-backend', 'data');
+  if (!fs.existsSync(oldDataDir)) return;
+  if (fs.existsSync(path.join(newDataDir, 'db', 'messages.db'))) return;
+
+  console.log(`[Desktop] Migrating data from ${oldDataDir} to ${newDataDir}`);
+  fs.cpSync(oldDataDir, newDataDir, { recursive: true });
+  console.log('[Desktop] Data migration complete');
+}
+
 function startBackend() {
   const nodePath = getNodePath();
   const entryPoint = getResourcePath('dist', 'index.js');
   const cwd = isDev ? path.join(__dirname, '..') : path.join(process.resourcesPath, 'app-backend');
 
+  const dataDir = getDataDir();
+  if (dataDir) {
+    fs.mkdirSync(dataDir, { recursive: true });
+    migrateOldData(dataDir);
+  }
+
   console.log(`[Desktop] Starting backend: ${nodePath} ${entryPoint}`);
   console.log(`[Desktop] CWD: ${cwd}`);
+  if (dataDir) console.log(`[Desktop] Data dir: ${dataDir}`);
 
   const envVars = { ...process.env };
-  const envFile = path.join(cwd, '.env');
-  if (fs.existsSync(envFile)) {
-    const lines = fs.readFileSync(envFile, 'utf-8').split('\n');
-    for (const line of lines) {
-      const match = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)/);
-      if (match) {
-        envVars[match[1]] = match[2].replace(/^["']|["']$/g, '').trim();
+  if (dataDir) envVars.HAPPYCLAW_DATA_DIR = dataDir;
+
+  // Read .env from both the exe directory and the app-backend directory
+  const envLocations = [
+    path.join(path.dirname(process.execPath), '.env'),
+    path.join(cwd, '.env'),
+  ];
+  for (const envFile of envLocations) {
+    if (fs.existsSync(envFile)) {
+      const lines = fs.readFileSync(envFile, 'utf-8').split('\n');
+      for (const line of lines) {
+        const match = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)/);
+        if (match) {
+          envVars[match[1]] = match[2].replace(/^["']|["']$/g, '').trim();
+        }
       }
     }
   }
