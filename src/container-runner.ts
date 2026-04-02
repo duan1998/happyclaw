@@ -942,10 +942,20 @@ export async function runHostAgent(
       }
     };
 
-    // 项目级 skills
+    // 项目级 skills（HappyClaw 内置）
     const projectRoot = process.cwd();
     linkSkillEntries(path.join(projectRoot, 'container', 'skills'));
-    // 用户级 skills（覆盖同名项目级）
+    // 工作区 IDE skills（.cursor/skills/ 和 .claude/skills/，后者覆盖前者同名）
+    if (groupDir !== defaultGroupDir) {
+      for (const subdir of ['.cursor', '.claude']) {
+        const wsSkillsDir = path.join(groupDir, subdir, 'skills');
+        if (fs.existsSync(wsSkillsDir)) {
+          linkSkillEntries(wsSkillsDir);
+          logger.info({ wsSkillsDir }, `Linked ${subdir}/skills/ from workspace`);
+        }
+      }
+    }
+    // 用户级 skills（最高优先级，覆盖同名项目级和工作区级）
     const ownerId = group.created_by;
     if (ownerId) {
       linkSkillEntries(path.join(DATA_DIR, 'skills', ownerId));

@@ -1,0 +1,17 @@
+feat: Windows compatibility + auto-discover .cursor/.claude workspace config
+
+Windows fixes:
+- Use os.homedir() instead of process.env.HOME for mount allowlist validation
+- Convert init_source_path to custom_cwd when Docker unavailable (host fallback)
+- Use fileURLToPath() for correct Windows path resolution in agent-runner
+- Add all drive letters to mount-allowlist.json
+
+Workspace config auto-discovery:
+- Auto-link .cursor/skills/ and .claude/skills/ to agent session (dedup by name)
+- Load .cursor/rules/*.mdc and .claude/rules/*.mdc into system prompt (alwaysApply only)
+- Parse .mcp.json and .claude/settings.json for MCP servers (dedup by name)
+- .claude/ takes priority over .cursor/ for same-name entries
+
+Docs:
+- Add WINDOWS-SETUP.md with full install guide and pitfall notes
+- Add README-WIN.md with daily operations reference

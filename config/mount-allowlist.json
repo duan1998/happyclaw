@@ -4,6 +4,31 @@
       "path": "~",
       "allowReadWrite": true,
       "description": "Full home directory access"
+    },
+    {
+      "path": "C:\\",
+      "allowReadWrite": true,
+      "description": "C drive"
+    },
+    {
+      "path": "D:\\",
+      "allowReadWrite": true,
+      "description": "D drive"
+    },
+    {
+      "path": "E:\\",
+      "allowReadWrite": true,
+      "description": "E drive"
+    },
+    {
+      "path": "G:\\",
+      "allowReadWrite": true,
+      "description": "G drive"
+    },
+    {
+      "path": "Z:\\",
+      "allowReadWrite": true,
+      "description": "Z drive"
     }
   ],
   "blockedPatterns": [],

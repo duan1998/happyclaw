@@ -69,6 +69,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { z } from 'zod';
@@ -342,35 +343,42 @@ groupRoutes.get('/', authMiddleware, (c) => {
 // POST /api/groups - 创建新群组
 groupRoutes.post('/', authMiddleware, async (c) => {
   const deps = getWebDeps();
-  if (!deps) return c.json({ error: 'Server not initialized' }, 500);
+  if (!deps) { logger.error('POST /api/groups: server not initialized'); return c.json({ error: 'Server not initialized' }, 500); }
 
   const body = await c.req.json().catch(() => ({}));
+  logger.info({ body }, 'POST /api/groups: received request');
 
   const validation = GroupCreateSchema.safeParse(body);
   if (!validation.success) {
-    return c.json({ error: 'Invalid request body' }, 400);
+    logger.error({ errors: validation.error.issues }, 'POST /api/groups: validation failed');
+    return c.json({ error: 'Invalid request body', details: validation.error.issues }, 400);
   }
 
   const name = normalizeGroupName(validation.data.name);
   if (!name) {
+    logger.error('POST /api/groups: empty name');
     return c.json({ error: 'Group name is required' }, 400);
   }
 
   // If user didn't specify execution mode, pick based on Docker availability
   const executionMode = validation.data.execution_mode || (await isDockerAvailable() ? 'container' : 'host');
-  const customCwd = validation.data.custom_cwd; // Schema already trims and converts empty to undefined
-  const initSourcePath = validation.data.init_source_path;
+  let customCwd = validation.data.custom_cwd;
+  let initSourcePath = validation.data.init_source_path;
   const initGitUrl = validation.data.init_git_url;
   const authUser = c.get('user') as AuthUser;
+
+  logger.info({ name, executionMode, customCwd, initSourcePath, initGitUrl, userId: authUser.id, role: authUser.role }, 'POST /api/groups: parsed params');
 
   // Billing: check group limit
   const groupLimit = checkGroupLimit(authUser.id, authUser.role);
   if (!groupLimit.allowed) {
+    logger.error({ reason: groupLimit.reason }, 'POST /api/groups: group limit exceeded');
     return c.json({ error: groupLimit.reason }, 403);
   }
 
   // 互斥校验：init_source_path 和 init_git_url 不能同时指定
   if (initSourcePath && initGitUrl) {
+    logger.error('POST /api/groups: both init_source_path and init_git_url specified');
     return c.json(
       { error: 'init_source_path and init_git_url are mutually exclusive' },
       400,
@@ -378,18 +386,27 @@ groupRoutes.post('/', authMiddleware, async (c) => {
   }
 
   // init_source_path / init_git_url 仅 container 模式可用
+  // 但当 Docker 不可用导致自动 fallback 到 host 时，将 init_source_path 转为 custom_cwd
   if (executionMode === 'host' && (initSourcePath || initGitUrl)) {
-    return c.json(
-      {
-        error:
-          'init_source_path and init_git_url are only valid for container mode',
-      },
-      400,
-    );
+    if (initSourcePath && !validation.data.execution_mode && !customCwd) {
+      logger.info({ initSourcePath }, 'POST /api/groups: Docker unavailable, converting init_source_path to custom_cwd for host mode');
+      customCwd = initSourcePath;
+      initSourcePath = undefined;
+    } else {
+      logger.error('POST /api/groups: init_source_path/init_git_url in host mode');
+      return c.json(
+        {
+          error:
+            'init_source_path and init_git_url are only valid for container mode',
+        },
+        400,
+      );
+    }
   }
 
   if (executionMode === 'host') {
     if (!hasHostExecutionPermission(authUser)) {
+      logger.error({ role: authUser.role }, 'POST /api/groups: no host execution permission');
       return c.json(
         { error: 'Insufficient permissions for host execution mode' },
         403,
@@ -397,6 +414,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     }
     if (customCwd) {
       if (!path.isAbsolute(customCwd)) {
+        logger.error({ customCwd }, 'POST /api/groups: custom_cwd not absolute');
         return c.json({ error: 'custom_cwd must be an absolute path' }, 400);
       }
 
@@ -405,18 +423,21 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       try {
         const stat = fs.statSync(customCwd);
         if (!stat.isDirectory()) {
+          logger.error({ customCwd }, 'POST /api/groups: custom_cwd not a directory');
           return c.json(
             { error: 'custom_cwd must be an existing directory' },
             400,
           );
         }
         realPath = fs.realpathSync(customCwd);
-      } catch {
+      } catch (err) {
+        logger.error({ customCwd, err }, 'POST /api/groups: custom_cwd does not exist');
         return c.json({ error: 'custom_cwd directory does not exist' }, 400);
       }
 
       // 白名单校验：检查路径是否在允许的根目录下
       const allowlist = loadMountAllowlist();
+      logger.info({ allowlist: allowlist ? { roots: allowlist.allowedRoots.length } : null, realPath, homedir: os.homedir() }, 'POST /api/groups: checking allowlist');
       if (
         allowlist &&
         allowlist.allowedRoots &&
@@ -426,7 +447,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
         for (const root of allowlist.allowedRoots) {
           const expandedRoot = root.path.startsWith('~')
             ? path.join(
-                process.env.HOME || '/Users/user',
+                os.homedir(),
                 root.path.slice(root.path.startsWith('~/') ? 2 : 1),
               )
             : path.resolve(root.path);
@@ -435,10 +456,12 @@ groupRoutes.post('/', authMiddleware, async (c) => {
           try {
             realRoot = fs.realpathSync(expandedRoot);
           } catch {
-            continue; // 允许的根目录不存在，跳过
+            logger.warn({ expandedRoot }, 'POST /api/groups: allowed root does not exist, skip');
+            continue;
           }
 
           const relative = path.relative(realRoot, realPath);
+          logger.info({ rootPath: root.path, expandedRoot, realRoot, realPath, relative }, 'POST /api/groups: path check');
           if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
             allowed = true;
             break;
@@ -449,6 +472,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
           const allowedPaths = allowlist.allowedRoots
             .map((r) => r.path)
             .join(', ');
+          logger.error({ realPath, allowedPaths }, 'POST /api/groups: custom_cwd not under allowed root');
           return c.json(
             {
               error: `custom_cwd must be under an allowed root. Allowed roots: ${allowedPaths}. Check config/mount-allowlist.json`,
@@ -459,6 +483,7 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       }
     }
   } else if (customCwd) {
+    logger.error({ executionMode, customCwd }, 'POST /api/groups: custom_cwd in non-host mode');
     return c.json({ error: 'custom_cwd is only valid for host mode' }, 400);
   }
 

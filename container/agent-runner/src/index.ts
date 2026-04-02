@@ -16,6 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { query, HookCallback, PreCompactHookInput, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 import { getChannelFromJid } from './channel-prefixes.js';
@@ -99,7 +100,7 @@ const IMAGE_MAX_DIMENSION = 8000; // Anthropic API 限制
 // ── 系统提示词优化：安全守则（从独立 Markdown 文件加载，始终注入所有容器） ──
 
 const SECURITY_RULES_PATH = path.join(
-  path.dirname(new URL(import.meta.url).pathname),
+  path.dirname(fileURLToPath(import.meta.url)),
   '..',
   'prompts',
   'security-rules.md',
@@ -918,6 +919,41 @@ function loadUserMcpServers(): Record<string, unknown> {
 }
 
 /**
+ * 从工作区加载 MCP server 配置（兼容 Cursor 和 Claude Code 两种格式）
+ * - .mcp.json（Cursor IDE 格式）
+ * - .claude/settings.json → mcpServers（Claude Code 格式，SDK 也会通过 settingSources 读取，
+ *   但这里显式合并确保在 options.mcpServers 中可见，SDK 内部会去重）
+ * 同名 server：.claude/ 覆盖 .mcp.json
+ */
+function loadWorkspaceMcpServers(): Record<string, unknown> {
+  const merged: Record<string, unknown> = {};
+
+  // 1. .mcp.json（Cursor 格式，低优先级）
+  const mcpJsonPath = path.join(WORKSPACE_GROUP, '.mcp.json');
+  try {
+    if (fs.existsSync(mcpJsonPath)) {
+      const mcpConfig = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf-8'));
+      if (mcpConfig.mcpServers && typeof mcpConfig.mcpServers === 'object') {
+        Object.assign(merged, mcpConfig.mcpServers);
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 2. .claude/settings.json（Claude Code 格式，高优先级，同名覆盖）
+  const claudeSettingsPath = path.join(WORKSPACE_GROUP, '.claude', 'settings.json');
+  try {
+    if (fs.existsSync(claudeSettingsPath)) {
+      const settings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf-8'));
+      if (settings.mcpServers && typeof settings.mcpServers === 'object') {
+        Object.assign(merged, settings.mcpServers);
+      }
+    }
+  } catch { /* ignore */ }
+
+  return merged;
+}
+
+/**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
  * allowing agent teams subagents to run to completion.
@@ -1073,6 +1109,42 @@ async function runQuery(
     globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
     globalClaudeMd = truncateWithHeadTail(globalClaudeMd, GLOBAL_CLAUDE_MD_MAX_CHARS);
   }
+
+  // Load workspace rules from .cursor/rules/ and .claude/rules/ (*.mdc files)
+  // .claude/ takes priority: same filename in .claude/ overrides .cursor/
+  let cursorRulesContent = '';
+  try {
+    const rulesByFile = new Map<string, string>();
+    for (const subdir of ['.cursor', '.claude']) {
+      const rulesDir = path.join(WORKSPACE_GROUP, subdir, 'rules');
+      if (!fs.existsSync(rulesDir)) continue;
+      const mdcFiles = fs.readdirSync(rulesDir).filter(f => f.endsWith('.mdc'));
+      for (const file of mdcFiles) {
+        try {
+          let content = fs.readFileSync(path.join(rulesDir, file), 'utf-8');
+          const fmMatch = content.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+          if (fmMatch) {
+            const frontmatter = fmMatch[1];
+            const body = fmMatch[2];
+            if (!/alwaysApply:\s*true/i.test(frontmatter)) continue;
+            content = body;
+          }
+          if (content.trim()) {
+            rulesByFile.set(file, content.trim());
+          }
+        } catch { /* skip unreadable files */ }
+      }
+    }
+    if (rulesByFile.size > 0) {
+      const snippets = [...rulesByFile.values()];
+      cursorRulesContent = snippets.join('\n\n---\n\n');
+      if (cursorRulesContent.length > 8000) {
+        cursorRulesContent = cursorRulesContent.slice(0, 8000) + '\n\n[...truncated]';
+      }
+      log(`Loaded ${rulesByFile.size} workspace rules (alwaysApply) from .cursor/ + .claude/`);
+    }
+  } catch { /* ignore */ }
+
   const outputGuidelines = [
     '',
     '## 输出格式',
@@ -1178,6 +1250,9 @@ async function runQuery(
     // L1: Identity — 用户身份与偏好（仅主容器注入）
     globalClaudeMd && `<user-profile>\n${globalClaudeMd}\n</user-profile>`,
 
+    // L1.5: Workspace rules — .cursor/rules/ (alwaysApply only)
+    cursorRulesContent && `<workspace-rules>\n${cursorRulesContent}\n</workspace-rules>`,
+
     // L2: Behavior — 核心行为约束（始终注入所有容器）
     `<behavior>\n${interactionGuidelines}\n</behavior>`,
     `<security>\n${SECURITY_RULES}\n</security>`,
@@ -1231,8 +1306,9 @@ async function runQuery(
       settingSources: ['project', 'user'],
       includePartialMessages: true,
       mcpServers: {
-        ...loadUserMcpServers(),     // 用户配置的 MCP（stdio/http/sse），SDK 原生支持
-        happyclaw: mcpServerConfig,  // 内置 SDK MCP 放最后，确保不被同名覆盖
+        ...loadWorkspaceMcpServers(), // 工作区 MCP（.mcp.json + .claude/settings.json，后者覆盖前者同名）
+        ...loadUserMcpServers(),      // 用户全局 MCP（session settings.json）
+        happyclaw: mcpServerConfig,   // 内置 SDK MCP 放最后，确保不被同名覆盖
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(isHome, isAdminHome, {
