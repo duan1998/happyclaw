@@ -721,9 +721,15 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
           <div className="space-y-0.5">
             {sortedFiles.map((item) => {
               const clickable = item.type === 'directory' || isClickableFile(item.name, !!item.isSystem);
+              const isDraggableFile = item.type !== 'directory';
               return (
                 <div
                   key={item.path}
+                  draggable={isDraggableFile}
+                  onDragStart={isDraggableFile ? (e) => {
+                    e.dataTransfer.effectAllowed = 'copy';
+                    e.dataTransfer.setData('happyclaw/files', JSON.stringify([{ path: item.path, name: item.name }]));
+                  } : undefined}
                   className={`flex items-center gap-2 px-2 py-1.5 rounded-lg transition-colors ${
                     clickable
                       ? 'hover:bg-muted cursor-pointer'

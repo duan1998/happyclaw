@@ -1,0 +1,68 @@
+{
+  "name": "happyclaw-desktop",
+  "version": "1.0.0",
+  "description": "HappyClaw Desktop — AI assistant for your team",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron . --dev",
+    "dist": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.happyclaw.desktop",
+    "productName": "HappyClaw",
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "signAndEditExecutable": false,
+      "forceCodeSigning": false
+    },
+    "portable": {
+      "artifactName": "HappyClaw.exe"
+    },
+    "extraResources": [
+      {
+        "from": "../happyclaw-portable/dist",
+        "to": "app-backend/dist"
+      },
+      {
+        "from": "../happyclaw-portable/node_modules",
+        "to": "app-backend/node_modules"
+      },
+      {
+        "from": "../happyclaw-portable/config",
+        "to": "app-backend/config"
+      },
+      {
+        "from": "../happyclaw-portable/container",
+        "to": "app-backend/container"
+      },
+      {
+        "from": "../happyclaw-portable/web/dist",
+        "to": "app-backend/web/dist"
+      },
+      {
+        "from": "../happyclaw-portable/shared",
+        "to": "app-backend/shared"
+      },
+      {
+        "from": "../happyclaw-portable/package.json",
+        "to": "app-backend/package.json"
+      },
+      {
+        "from": "../happyclaw-portable/node/node.exe",
+        "to": "node/node.exe"
+      }
+    ]
+  }
+}

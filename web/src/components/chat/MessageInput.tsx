@@ -19,6 +19,8 @@ import { useDisplayMode } from '../../hooks/useDisplayMode';
 interface PendingFile {
   /** Display name: relative path for folder uploads, file name otherwise */
   label: string;
+  /** Where this file came from: 'upload' = user uploaded, 'workspace' = dragged from file panel */
+  source?: 'upload' | 'workspace';
 }
 
 interface PendingImage {
@@ -52,6 +54,8 @@ export function MessageInput({
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragCounterRef = useRef(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -163,8 +167,18 @@ export function MessageInput({
       let message = trimmed;
 
       if (hasPending) {
-        const list = pendingFiles.map((f) => `- ${f.label}`).join('\n');
-        const prefix = `[我上传了以下文件到工作区，请查看并使用]\n${list}`;
+        const uploaded = pendingFiles.filter((f) => f.source !== 'workspace');
+        const workspace = pendingFiles.filter((f) => f.source === 'workspace');
+        const parts: string[] = [];
+        if (uploaded.length > 0) {
+          const list = uploaded.map((f) => `- ${f.label}`).join('\n');
+          parts.push(`[我上传了以下文件到工作区，请查看并使用]\n${list}`);
+        }
+        if (workspace.length > 0) {
+          const list = workspace.map((f) => `- ${f.label}`).join('\n');
+          parts.push(`[请查看以下工作区文件]\n${list}`);
+        }
+        const prefix = parts.join('\n\n');
         message = message ? `${prefix}\n\n${message}` : prefix;
         setPendingFiles([]);
       }
@@ -366,6 +380,47 @@ export function MessageInput({
     setPendingImages([]);
   };
 
+  const handleDragOver = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes('happyclaw/files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes('happyclaw/files')) return;
+    e.preventDefault();
+    dragCounterRef.current++;
+    if (dragCounterRef.current === 1) setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes('happyclaw/files')) return;
+    e.preventDefault();
+    dragCounterRef.current--;
+    if (dragCounterRef.current <= 0) {
+      dragCounterRef.current = 0;
+      setIsDragOver(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setIsDragOver(false);
+    const raw = e.dataTransfer.getData('happyclaw/files');
+    if (!raw) return;
+    try {
+      const files: Array<{ path: string; name: string }> = JSON.parse(raw);
+      setPendingFiles((prev) => {
+        const existingLabels = new Set(prev.map((f) => f.label));
+        const newFiles = files
+          .filter((f) => !existingLabels.has(f.path))
+          .map((f) => ({ label: f.path, source: 'workspace' as const }));
+        return [...prev, ...newFiles];
+      });
+    } catch { /* ignore malformed data */ }
+  };
+
   const hasContent = content.trim().length > 0;
   const canSend = (hasContent || pendingFiles.length > 0 || pendingImages.length > 0) && !sending;
 
@@ -402,7 +457,17 @@ export function MessageInput({
         )}
 
         {/* Main input card */}
-        <div className={isCompact ? 'bg-surface border border-border rounded-lg' : 'bg-surface rounded-2xl border border-border shadow-sm'}>
+        <div
+          onDragOver={handleDragOver}
+          onDragEnter={handleDragEnter}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className={`${isCompact ? 'bg-surface border rounded-lg' : 'bg-surface rounded-2xl border shadow-sm'} ${
+            isDragOver
+              ? 'border-primary border-2 bg-brand-50/30 dark:bg-primary/5'
+              : 'border-border'
+          } transition-colors`}
+        >
           {/* Send error banner */}
           {sendError && (
             <div className={`px-4 py-2 bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 text-xs font-medium border-b border-red-100 dark:border-red-800 flex items-center gap-2 ${isCompact ? 'rounded-t-lg' : 'rounded-t-2xl'}`}>
@@ -452,7 +517,9 @@ export function MessageInput({
               <div className="flex items-center gap-1 mb-1">
                 <Paperclip className="w-3 h-3 text-muted-foreground" />
                 <span className="text-[11px] text-muted-foreground">
-                  已上传 {pendingFiles.length} 个文件，发送时将告知 AI
+                  {pendingFiles.some((f) => f.source === 'workspace')
+                    ? `已引用 ${pendingFiles.length} 个文件，发送时将告知 AI`
+                    : `已上传 ${pendingFiles.length} 个文件，发送时将告知 AI`}
                 </span>
                 <button
                   onClick={clearPendingFiles}
@@ -462,12 +529,19 @@ export function MessageInput({
                 </button>
               </div>
               <div className="flex flex-wrap gap-1 pb-1">
-                {pendingFiles.map((file, i) => (
+                {pendingFiles.map((file, i) => {
+                  const displayName = file.label.includes('/') ? file.label.split('/').pop()! : file.label;
+                  return (
                   <span
                     key={i}
-                    className="inline-flex items-center gap-1 max-w-[200px] px-2 py-0.5 bg-brand-50 text-primary text-[11px] rounded-md"
+                    className={`inline-flex items-center gap-1 max-w-[200px] px-2 py-0.5 text-[11px] rounded-md ${
+                      file.source === 'workspace'
+                        ? 'bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400'
+                        : 'bg-brand-50 text-primary'
+                    }`}
+                    title={file.label}
                   >
-                    <span className="truncate">{file.label}</span>
+                    <span className="truncate">{displayName}</span>
                     <button
                       onClick={() => removePendingFile(i)}
                       className="flex-shrink-0 hover:text-primary cursor-pointer p-1 min-w-[28px] min-h-[28px] flex items-center justify-center"
@@ -476,7 +550,8 @@ export function MessageInput({
                       <X className="w-3.5 h-3.5" />
                     </button>
                   </span>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
