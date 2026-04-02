@@ -190,8 +190,9 @@ interface ChatState {
   resetSession: (jid: string, agentId?: string) => Promise<boolean>;
   clearHistory: (jid: string) => Promise<boolean>;
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
-  createFlow: (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => Promise<{ jid: string; folder: string } | null>;
+  createFlow: (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string; default_runtime?: 'claude' | 'codex' }) => Promise<{ jid: string; folder: string } | null>;
   renameFlow: (jid: string, name: string) => Promise<void>;
+  updateGroupRuntime: (jid: string, runtime: 'claude' | 'codex', model?: string) => Promise<boolean>;
   togglePin: (jid: string) => Promise<void>;
   deleteFlow: (jid: string) => Promise<void>;
   handleStreamEvent: (chatJid: string, event: StreamEvent, agentId?: string) => void;
@@ -208,8 +209,9 @@ interface ChatState {
   deleteAgentAction: (jid: string, agentId: string) => Promise<boolean>;
   setActiveAgentTab: (jid: string, agentId: string | null) => void;
   // Conversation agent actions
-  createConversation: (jid: string, name: string, description?: string) => Promise<AgentInfo | null>;
+  createConversation: (jid: string, name: string, description?: string, agentRuntime?: 'claude' | 'codex', agentModel?: string) => Promise<AgentInfo | null>;
   renameConversation: (jid: string, agentId: string, name: string) => Promise<boolean>;
+  updateAgentModel: (jid: string, agentId: string, agentRuntime?: 'claude' | 'codex', agentModel?: string | null) => Promise<boolean>;
   loadAgentMessages: (jid: string, agentId: string, loadMore?: boolean) => Promise<void>;
   sendAgentMessage: (jid: string, agentId: string, content: string, attachments?: Array<{ data: string; mimeType: string }>) => void;
   refreshAgentMessages: (jid: string, agentId: string) => Promise<void>;
@@ -1089,13 +1091,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  createFlow: async (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string }) => {
+  createFlow: async (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string; default_runtime?: 'claude' | 'codex' }) => {
     try {
       const body: Record<string, string> = { name };
       if (options?.execution_mode) body.execution_mode = options.execution_mode;
       if (options?.custom_cwd) body.custom_cwd = options.custom_cwd;
       if (options?.init_source_path) body.init_source_path = options.init_source_path;
       if (options?.init_git_url) body.init_git_url = options.init_git_url;
+      if (options?.default_runtime) body.default_runtime = options.default_runtime;
 
       const needsLongTimeout = !!(options?.init_source_path || options?.init_git_url);
       const data = await api.post<{
@@ -1136,6 +1139,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     } catch (err) {
       set({ error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  updateGroupRuntime: async (jid: string, runtime: 'claude' | 'codex', model?: string) => {
+    try {
+      const body: Record<string, string | undefined> = { default_runtime: runtime };
+      if (model !== undefined) body.default_model = model;
+      await api.patch(`/api/groups/${encodeURIComponent(jid)}`, body);
+      set((s) => {
+        const group = s.groups[jid];
+        if (!group) return s;
+        return {
+          groups: {
+            ...s.groups,
+            [jid]: {
+              ...group,
+              default_runtime: runtime,
+              ...(model !== undefined ? { default_model: model } : {}),
+            },
+          },
+        };
+      });
+      return true;
+    } catch {
+      return false;
     }
   },
 
@@ -1703,15 +1731,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       const idx = existing.findIndex((a) => a.id === agentId);
       const resolvedKind = kind || (idx >= 0 ? existing[idx].kind : 'task');
+      const prev = idx >= 0 ? existing[idx] : undefined;
       const agentInfo: AgentInfo = {
         id: agentId,
         name,
         prompt,
         status,
         kind: resolvedKind,
-        created_at: idx >= 0 ? existing[idx].created_at : new Date().toISOString(),
+        created_at: prev?.created_at ?? new Date().toISOString(),
         completed_at: (status === 'completed' || status === 'error') ? new Date().toISOString() : undefined,
         result_summary: resultSummary,
+        agent_runtime: prev?.agent_runtime,
+        agent_model: prev?.agent_model,
+        linked_im_groups: prev?.linked_im_groups,
       };
       const updated = idx >= 0
         ? existing.map((a, i) => (i === idx ? agentInfo : a))
@@ -1894,11 +1926,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   // -- Conversation agent actions --
 
-  createConversation: async (jid, name, description?) => {
+  createConversation: async (jid, name, description?, agentRuntime?, agentModel?) => {
     try {
+      const body: Record<string, string | undefined> = { name, description, agent_runtime: agentRuntime };
+      if (agentModel) body.agent_model = agentModel;
       const data = await api.post<{ agent: AgentInfo }>(
         `/api/groups/${encodeURIComponent(jid)}/agents`,
-        { name, description },
+        body,
       );
       set((s) => {
         const existing = s.agents[jid] || [];
@@ -1919,6 +1953,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => {
         const agents = (s.agents[jid] || []).map((a) =>
           a.id === agentId ? { ...a, name } : a,
+        );
+        return { agents: { ...s.agents, [jid]: agents } };
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  updateAgentModel: async (jid, agentId, agentRuntime?, agentModel?) => {
+    try {
+      const body: Record<string, string | null | undefined> = {};
+      if (agentRuntime !== undefined) body.agent_runtime = agentRuntime;
+      if (agentModel !== undefined) body.agent_model = agentModel;
+      await api.patch(`/api/groups/${encodeURIComponent(jid)}/agents/${agentId}`, body);
+      set((s) => {
+        const agents = (s.agents[jid] || []).map((a) =>
+          a.id === agentId
+            ? {
+                ...a,
+                ...(agentRuntime !== undefined ? { agent_runtime: agentRuntime } : {}),
+                ...(agentModel !== undefined ? { agent_model: agentModel ?? undefined } : {}),
+              }
+            : a,
         );
         return { agents: { ...s.agents, [jid]: agents } };
       });

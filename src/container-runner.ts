@@ -9,6 +9,7 @@ import {
   execFileSync,
   spawn,
 } from 'child_process';
+import crossSpawn from 'cross-spawn';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -113,6 +114,7 @@ export interface ContainerInput {
   images?: Array<{ data: string; mimeType?: string }>;
   agentId?: string;
   agentName?: string;
+  agentModel?: string;
 }
 
 export interface ContainerOutput {
@@ -1028,6 +1030,10 @@ export async function runHostAgent(
     );
     hostEnv['HAPPYCLAW_WORKSPACE_IPC'] = groupIpcDir;
     hostEnv['CLAUDE_CONFIG_DIR'] = groupSessionsDir;
+    // Per-conversation model override for Claude runtime
+    if (input.agentModel) {
+      hostEnv['ANTHROPIC_MODEL'] = input.agentModel;
+    }
     // 让 SDK 捕获 CLI 的 stderr 输出，便于排查启动失败
     hostEnv['DEBUG_CLAUDE_AGENT_SDK'] = '1';
     // CLI 禁止 root 用户使用 --dangerously-skip-permissions，
@@ -1258,5 +1264,434 @@ export async function runHostAgent(
     if (hostSelectedProfileId) {
       providerPool.releaseSession(hostSelectedProfileId);
     }
+  }
+}
+
+/**
+ * On Windows, resolve a codex command to its underlying JS entry point.
+ *
+ * Two problems with calling codex via .cmd wrappers on Windows:
+ * 1. The Windows Store version lives under WindowsApps/ → "Access is denied"
+ * 2. Going through cmd.exe → .cmd → node causes full stdout buffering,
+ *    so streaming JSON Lines output is held until process exit.
+ *
+ * Solution: find the npm global .cmd file, parse it to extract the JS entry
+ * point, and return {nodeExe, jsEntry} so we can spawn node directly.
+ */
+interface ResolvedCodex {
+  command: string;
+  args: string[];
+}
+
+function resolveCodexOnWindows(cmd: string): ResolvedCodex {
+  const fallback: ResolvedCodex = { command: cmd, args: [] };
+  if (process.platform !== 'win32' || path.isAbsolute(cmd)) return fallback;
+
+  try {
+    const whereOutput = execFileSync('where.exe', [cmd], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const candidates = whereOutput.trim().split(/\r?\n/).filter(Boolean);
+    const npmCmd = candidates.find((p) => {
+      const lower = p.toLowerCase().trim();
+      return !lower.includes('\\windowsapps\\') && lower.endsWith('.cmd');
+    });
+
+    if (npmCmd) {
+      const cmdContent = fs.readFileSync(npmCmd.trim(), 'utf-8');
+      // npm .cmd files contain: "%_prog%"  "%dp0%\node_modules\...\bin\file.js" %*
+      const jsMatch = cmdContent.match(/%dp0%\\([^"]+\.js)/);
+      if (jsMatch) {
+        const cmdDir = path.dirname(npmCmd.trim());
+        const jsEntry = path.join(cmdDir, jsMatch[1]);
+        if (fs.existsSync(jsEntry)) {
+          return { command: process.execPath, args: [jsEntry] };
+        }
+      }
+      return { command: npmCmd.trim(), args: [] };
+    }
+  } catch {
+    // where.exe failed — command not in PATH at all
+  }
+
+  return fallback;
+}
+
+/**
+ * Run agent using Codex CLI (`codex exec --json`).
+ * Bypasses Claude Agent SDK entirely — spawns Codex CLI subprocess and parses
+ * its JSON Lines output stream, mapping events to StreamEvent types.
+ */
+export async function runCodexHostAgent(
+  group: RegisteredGroup,
+  input: ContainerInput,
+  onProcess: (proc: ChildProcess, identifier: string) => void,
+  onOutput?: (output: ContainerOutput) => Promise<void>,
+): Promise<ContainerOutput> {
+  const { getCodexProviderConfig, writeSessionCodexAuth, writeSessionCodexConfig, isCodexAuthAvailable } = await import('./codex-config.js');
+
+  const config = getCodexProviderConfig();
+  const startTime = Date.now();
+
+  if (!isCodexAuthAvailable(config)) {
+    return {
+      status: 'error',
+      result: config.authMode === 'chatgpt'
+        ? 'Codex 尚未配置认证。请到"设置 → Codex 提供商"检测并导入本机 Codex 凭据，或切换为 API Key 模式。'
+        : 'Codex API Key 未设置。请到"设置 → Codex 提供商"填写 API Key。',
+    };
+  }
+
+  // Determine working directory
+  const groupDir = group.customCwd || path.join(GROUPS_DIR, group.folder);
+  if (!fs.existsSync(groupDir)) {
+    fs.mkdirSync(groupDir, { recursive: true });
+  }
+
+  // Prepare session directory for Codex config
+  const agentSubDir = input.agentId ? path.join('agents', input.agentId) : '';
+  const sessionDir = path.join(DATA_DIR, 'sessions', group.folder, agentSubDir, 'codex-home');
+  fs.mkdirSync(sessionDir, { recursive: true });
+
+  // Write session-level auth.json and config.toml
+  writeSessionCodexAuth(sessionDir);
+  writeSessionCodexConfig(sessionDir, input.agentModel || undefined);
+
+  // Build environment
+  const codexEnv: Record<string, string> = {
+    ...process.env as Record<string, string>,
+    CODEX_HOME: sessionDir,
+    HOME: sessionDir,
+    USERPROFILE: sessionDir,
+  };
+
+  // For API key mode, also set OPENAI_API_KEY env
+  if (config.authMode === 'api_key' && config.apiKey) {
+    codexEnv.OPENAI_API_KEY = config.apiKey;
+  }
+  // Clear env vars that might conflict
+  delete codexEnv.OPENAI_BASE_URL;
+
+  // Resolve codex command — on Windows, find the JS entry point to bypass
+  // cmd.exe chain which causes stdout buffering.
+  const resolved = resolveCodexOnWindows(config.codexCommand || 'codex');
+  const args: string[] = [...resolved.args, 'exec', '--json', '--skip-git-repo-check'];
+
+  // Resume existing session if available
+  if (input.sessionId) {
+    args.push('resume', input.sessionId);
+  }
+
+  args.push(input.prompt);
+
+  logger.info(
+    { group: group.name, workingDir: groupDir, codexCmd: resolved.command, argCount: args.length,
+      args: args.map((a, i) => i === args.length - 1 ? a.slice(0, 80) + '...' : a) },
+    'Spawning Codex agent',
+  );
+
+  return new Promise<ContainerOutput>((resolve) => {
+    let settled = false;
+    const resolveOnce = (output: ContainerOutput): void => {
+      if (settled) return;
+      settled = true;
+      resolve(output);
+    };
+
+    // On Windows, resolved.command is `node.exe` with JS entry as first arg,
+    // bypassing cmd.exe → .cmd chain that causes full stdout buffering.
+    const proc = spawn(resolved.command, args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: codexEnv,
+      cwd: groupDir,
+      detached: process.platform !== 'win32',
+    });
+
+    // Send EOF immediately so codex doesn't wait for stdin input.
+    proc.stdin!.on('error', () => {});
+    proc.stdin!.end();
+
+    logger.info({ group: group.name, pid: proc.pid }, 'Codex process spawned');
+
+    const processId = `codex-${group.folder}-${Date.now()}`;
+    onProcess(proc, processId);
+
+    // Timeout management
+    let timedOut = false;
+    const timeoutMs = group.containerConfig?.timeout || getSystemSettings().containerTimeout;
+
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+    const killOnTimeout = () => {
+      timedOut = true;
+      logger.error({ group: group.name, processId }, 'Codex agent timeout, killing');
+      killProcessTree(proc, 'SIGTERM');
+      killTimer = setTimeout(() => {
+        if (proc.exitCode === null && proc.signalCode === null) {
+          killProcessTree(proc, 'SIGKILL');
+        }
+      }, 5000);
+    };
+    let timeout = setTimeout(killOnTimeout, timeoutMs);
+    const resetTimeout = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(killOnTimeout, timeoutMs);
+    };
+
+    // Parse JSON Lines from stdout
+    let lastSessionId: string | undefined;
+    let lastTurnId: string | undefined;
+    let stdoutBuffer = '';
+    let finalText = '';
+
+    let firstStdout = true;
+    proc.stdout!.on('data', (chunk: Buffer) => {
+      resetTimeout();
+      if (firstStdout) {
+        firstStdout = false;
+        logger.info({ group: group.name, pid: proc.pid, bytes: chunk.length, preview: chunk.toString().slice(0, 300) }, 'Codex first stdout data');
+      }
+      stdoutBuffer += chunk.toString();
+
+      // Process complete lines
+      let newlineIdx: number;
+      while ((newlineIdx = stdoutBuffer.indexOf('\n')) !== -1) {
+        const line = stdoutBuffer.slice(0, newlineIdx).trim();
+        stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
+        if (!line) continue;
+
+        try {
+          const event = JSON.parse(line);
+          logger.debug({ group: group.name, eventType: event.type, itemType: event.item?.type }, 'Codex event received');
+          const mapped = mapCodexEventToStreamEvent(event);
+          if (!mapped) continue;
+
+          // Track session/turn IDs
+          if (event.type === 'thread.started' && event.thread_id) {
+            lastSessionId = event.thread_id as string;
+          }
+          if (event.id) lastTurnId = event.id;
+
+          // Accumulate text for final result
+          if (mapped.eventType === 'text_delta' && mapped.text) {
+            finalText += mapped.text;
+          }
+
+          mapped.sessionId = lastSessionId;
+          mapped.turnId = lastTurnId;
+
+          if (onOutput) {
+            void onOutput({
+              status: 'stream',
+              result: null,
+              streamEvent: mapped,
+              sessionId: lastSessionId,
+              turnId: lastTurnId,
+            });
+          }
+        } catch {
+          logger.debug({ line: line.slice(0, 200) }, 'Codex: unparseable JSON line');
+        }
+      }
+    });
+
+    // Capture stderr for error reporting
+    let stderrContent = '';
+    let firstStderr = true;
+    proc.stderr!.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderrContent += text;
+      if (firstStderr) {
+        firstStderr = false;
+        logger.info({ group: group.name, pid: proc.pid, stderr: text.slice(0, 300) }, 'Codex first stderr data');
+      }
+    });
+
+    proc.on('close', (code) => {
+      clearTimeout(timeout);
+      if (killTimer) clearTimeout(killTimer);
+      const duration = Date.now() - startTime;
+      logger.info({ group: group.name, pid: proc.pid, code, duration, stderrLen: stderrContent.length, resultLen: finalText.length }, 'Codex process closed');
+
+      if (timedOut) {
+        resolveOnce({
+          status: 'error',
+          result: `Codex agent timed out after ${Math.round(duration / 1000)}s`,
+          error: 'timeout',
+        });
+        return;
+      }
+
+      if (code !== 0 && code !== null) {
+        const stderrTail = stderrContent.slice(-500).trim();
+        const errorDetail = stderrTail || `exit code ${code}`;
+
+        // If resume failed (stale session), retry without session ID
+        if (input.sessionId && /thread\/resume|no rollout found/i.test(stderrTail)) {
+          logger.warn(
+            { group: group.name, sessionId: input.sessionId },
+            'Codex session resume failed, retrying with fresh session',
+          );
+          void (async () => {
+            const { deleteSession } = await import('./db.js');
+            deleteSession(group.folder);
+            const retryInput = { ...input, sessionId: undefined };
+            const retryResult = await runCodexHostAgent(group, retryInput, onProcess, onOutput);
+            resolveOnce(retryResult);
+          })();
+          return;
+        }
+
+        logger.error(
+          { group: group.name, code, stderr: stderrTail, stdout: stdoutBuffer.slice(0, 500) },
+          'Codex agent exited with error',
+        );
+        resolveOnce({
+          status: 'error',
+          result: `Codex 执行失败 (code ${code})：${errorDetail}`,
+          error: errorDetail,
+        });
+        return;
+      }
+
+      // Emit the final result via onOutput so processGroupMessages sets
+      // sentReply = true and doesn't fall into buildInterruptedReply.
+      if (onOutput && finalText) {
+        void onOutput({
+          status: 'success',
+          result: finalText,
+          newSessionId: lastSessionId,
+          sessionId: lastSessionId,
+          turnId: lastTurnId,
+          finalizationReason: 'completed',
+        });
+      }
+
+      resolveOnce({
+        status: 'success',
+        result: finalText || null,
+        newSessionId: lastSessionId,
+      });
+    });
+
+    proc.on('error', (err) => {
+      clearTimeout(timeout);
+      logger.error(
+        { group: group.name, processId, error: err },
+        'Codex agent spawn error',
+      );
+      const hint = process.platform === 'win32'
+        ? ` On Windows, run: npm install -g @openai/codex`
+        : '';
+      resolveOnce({
+        status: 'error',
+        result: null,
+        error: `Codex spawn error: ${err.message}. Is codex installed and in PATH?${hint}`,
+      });
+    });
+  });
+}
+
+/**
+ * Map a Codex JSON Lines event to our StreamEvent type.
+ *
+ * Codex `exec --json` emits these event types:
+ *   thread.started, turn.started,
+ *   item.started   (command_execution → tool_use_start)
+ *   item.completed  (agent_message → text_delta, reasoning → thinking_delta,
+ *                    command_execution → tool_use_end, error → status)
+ *   response.output_text.delta  (streaming text)
+ *   response.reasoning_summary_text.delta  (streaming thinking)
+ *   response.function_call_arguments.start / .done
+ *   function_call / function_call_output
+ *   turn.completed, error
+ */
+function mapCodexEventToStreamEvent(event: Record<string, unknown>): StreamEvent | null {
+  const type = event.type as string;
+
+  switch (type) {
+    case 'thread.started':
+      return { eventType: 'init', text: 'Codex session started' };
+
+    case 'response.output_text.delta':
+      return { eventType: 'text_delta', text: event.delta as string };
+
+    case 'response.reasoning_summary_text.delta':
+      return { eventType: 'thinking_delta', text: event.delta as string };
+
+    case 'item.started': {
+      const item = event.item as Record<string, unknown> | undefined;
+      if (item?.type === 'command_execution') {
+        const name = (item.name as string) || 'Bash';
+        return { eventType: 'tool_use_start', toolName: name, toolUseId: item.id as string };
+      }
+      return null;
+    }
+
+    case 'item.completed': {
+      const item = event.item as Record<string, unknown> | undefined;
+      if (!item) return null;
+
+      switch (item.type) {
+        case 'agent_message':
+          if (typeof item.text === 'string' && item.text) {
+            return { eventType: 'text_delta', text: item.text };
+          }
+          return null;
+        case 'reasoning':
+          if (typeof item.text === 'string' && item.text) {
+            return { eventType: 'thinking_delta', text: item.text };
+          }
+          return null;
+        case 'command_execution':
+          return { eventType: 'tool_use_end', toolUseId: item.id as string };
+        case 'error':
+          return {
+            eventType: 'status',
+            statusText: `Error: ${typeof item.text === 'string' ? item.text : JSON.stringify(item)}`,
+          };
+        default:
+          return null;
+      }
+    }
+
+    case 'response.function_call_arguments.start':
+    case 'function_call': {
+      const name = (event.name as string) || (event.call_id as string) || 'tool';
+      return { eventType: 'tool_use_start', toolName: name, toolUseId: event.call_id as string };
+    }
+
+    case 'response.function_call_arguments.done':
+    case 'function_call_output':
+      return { eventType: 'tool_use_end', toolUseId: event.call_id as string };
+
+    case 'error':
+      return {
+        eventType: 'status',
+        statusText: `Error: ${typeof event.message === 'string' ? event.message : JSON.stringify(event)}`,
+      };
+
+    case 'turn.completed': {
+      const usage = event.usage as Record<string, number> | undefined;
+      if (usage) {
+        return {
+          eventType: 'usage',
+          usage: {
+            inputTokens: usage.input_tokens ?? 0,
+            outputTokens: usage.output_tokens ?? 0,
+            cacheReadInputTokens: (usage.input_tokens_details as unknown as Record<string, number> | undefined)?.cached_tokens ?? 0,
+            cacheCreationInputTokens: 0,
+            costUSD: 0,
+            durationMs: 0,
+            numTurns: 1,
+          },
+        };
+      }
+      return null;
+    }
+
+    default:
+      return null;
   }
 }

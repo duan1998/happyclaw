@@ -17,6 +17,8 @@ export interface GroupInfo {
   created_by?: string;
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  default_runtime?: 'claude' | 'codex';
+  default_model?: string;
 }
 
 export interface AgentInfo {
@@ -29,6 +31,8 @@ export interface AgentInfo {
   completed_at?: string;
   result_summary?: string;
   linked_im_groups?: Array<{ jid: string; name: string }>;
+  agent_runtime?: 'claude' | 'codex';
+  agent_model?: string;
 }
 
 export interface AvailableImGroup {

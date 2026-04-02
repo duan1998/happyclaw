@@ -155,6 +155,8 @@ interface GroupPayloadItem {
   member_count?: number;
   pinned_at?: string;
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
+  default_runtime?: 'claude' | 'codex';
+  default_model?: string;
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
@@ -263,6 +265,8 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       member_count: isShared ? memberInfo?.count : undefined,
       pinned_at: pins[jid] || undefined,
       activation_mode: group.activation_mode ?? 'auto',
+      default_runtime: group.default_runtime ?? 'claude',
+      default_model: group.default_model,
     };
   }
 
@@ -604,6 +608,8 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     initSourcePath: executionMode !== 'host' ? initSourcePath : undefined,
     initGitUrl: executionMode !== 'host' ? initGitUrl : undefined,
     created_by: authUser.id,
+    default_runtime: validation.data.default_runtime ?? 'claude',
+    default_model: validation.data.default_model,
   };
 
   setRegisteredGroup(jid, group);
@@ -678,6 +684,8 @@ groupRoutes.post('/', authMiddleware, async (c) => {
       member_role: 'owner',
       member_count: 1,
       is_shared: false,
+      default_runtime: group.default_runtime ?? 'claude',
+      default_model: group.default_model,
     },
   });
 });
@@ -704,6 +712,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned,
     activation_mode,
     execution_mode,
+    default_runtime,
+    default_model,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -712,7 +722,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     !name &&
     is_pinned === undefined &&
     activation_mode === undefined &&
-    execution_mode === undefined
+    execution_mode === undefined &&
+    default_runtime === undefined &&
+    default_model === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
   }
@@ -738,7 +750,9 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     is_pinned !== undefined &&
     !name &&
     activation_mode === undefined &&
-    execution_mode === undefined;
+    execution_mode === undefined &&
+    default_runtime === undefined &&
+    default_model === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -780,8 +794,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     unpinGroup(authUser.id, jid);
   }
 
-  // Update registered group if name, activation_mode, or execution_mode changed
-  if (name || activation_mode !== undefined || execution_mode !== undefined) {
+  // Update registered group if any group-level field changed
+  if (name || activation_mode !== undefined || execution_mode !== undefined || default_runtime !== undefined || default_model !== undefined) {
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -804,6 +818,14 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         activation_mode !== undefined
           ? activation_mode
           : existing.activation_mode,
+      default_runtime:
+        default_runtime !== undefined
+          ? default_runtime
+          : existing.default_runtime,
+      default_model:
+        default_model !== undefined
+          ? default_model
+          : existing.default_model,
     };
 
     setRegisteredGroup(jid, updated);
@@ -811,7 +833,12 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     deps.getRegisteredGroups()[jid] = updated;
   }
 
-  return c.json({ success: true, pinned_at });
+  return c.json({
+    success: true,
+    pinned_at,
+    default_runtime: default_runtime ?? existing.default_runtime ?? 'claude',
+    default_model: default_model ?? existing.default_model,
+  });
 });
 
 // DELETE /api/groups/:jid - 删除群组

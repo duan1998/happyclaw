@@ -9,6 +9,7 @@ import { ContainerEnvPanel } from './ContainerEnvPanel';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { PromptDialog } from '@/components/common/PromptDialog';
+import { NewConversationDialog } from './NewConversationDialog';
 import { ArrowLeft, FolderOpen, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Puzzle, Server, Sun, Terminal, Users, Variable, X } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useTheme } from '../../hooks/useTheme';
@@ -54,6 +55,7 @@ interface ChatViewProps {
 export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const { mode: displayMode, toggle: toggleDisplayMode } = useDisplayMode();
   const { theme, toggle: toggleTheme } = useTheme();
+  const updateGroupRuntime = useChatStore((s) => s.updateGroupRuntime);
   const [mobilePanel, setMobilePanel] = useState<SidebarTab | null>(null);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('files');
   const [panelOpen, setPanelOpen] = useState(false);
@@ -105,6 +107,7 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const agentStreaming = useChatStore(s => s.agentStreaming);
   const createConversation = useChatStore(s => s.createConversation);
   const renameConversation = useChatStore(s => s.renameConversation);
+  const updateAgentModel = useChatStore(s => s.updateAgentModel);
   const loadAgentMessages = useChatStore(s => s.loadAgentMessages);
   const refreshAgentMessages = useChatStore(s => s.refreshAgentMessages);
   const sendAgentMessage = useChatStore(s => s.sendAgentMessage);
@@ -557,6 +560,13 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 }}
                 groupJid={groupJid}
                 onResetSession={() => { setResetAgentId(activeAgentTab); setShowResetConfirm(true); }}
+                modelInfo={activeAgent ? {
+                  agentRuntime: activeAgent.agent_runtime ?? 'claude',
+                  agentModel: activeAgent.agent_model,
+                } : undefined}
+                onModelChange={activeAgent ? (model) => {
+                  updateAgentModel(groupJid, activeAgentTab!, undefined, model);
+                } : undefined}
               />
             </>
           ) : (
@@ -579,6 +589,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 groupJid={groupJid}
                 onResetSession={() => { setResetAgentId(null); setShowResetConfirm(true); }}
                 onToggleTerminal={canUseTerminal ? handleTerminalToggle : undefined}
+                modelInfo={{ agentRuntime: group?.default_runtime ?? 'claude', agentModel: group?.default_model }}
+                onModelChange={(model) => { updateGroupRuntime(groupJid, group?.default_runtime ?? 'claude', model); }}
               />
             </>
           )}
@@ -819,8 +831,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         onConfirm={handleResetSession}
         title="清除上下文"
         message={resetAgentId
-          ? '将清除该子对话的 Claude 会话上下文，下次发送消息时将开始全新会话。聊天记录不受影响。'
-          : '将清除 Claude 会话上下文并停止运行中的工作区进程，下次发送消息时将开始全新会话。聊天记录不受影响。'
+          ? `将清除该子对话的 ${(agents.find(a => a.id === resetAgentId)?.agent_runtime === 'codex' ? 'Codex' : 'Claude')} 会话上下文，下次发送消息时将开始全新会话。聊天记录不受影响。`
+          : `将清除 ${(group?.default_runtime ?? 'claude') === 'codex' ? 'Codex' : 'Claude'} 会话上下文并停止运行中的工作区进程，下次发送消息时将开始全新会话。聊天记录不受影响。`
         }
         confirmText="清除"
         confirmVariant="danger"
@@ -838,13 +850,11 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         />
       )}
 
-      <PromptDialog
+      <NewConversationDialog
         open={showNewConversation}
-        title="新建对话"
-        label="对话名称"
-        placeholder="输入对话名称"
-        onConfirm={(name) => {
-          createConversation(groupJid, name).then((agent) => {
+        defaultRuntime={group?.default_runtime ?? 'claude'}
+        onConfirm={(name, runtime, model) => {
+          createConversation(groupJid, name, undefined, runtime, model).then((agent) => {
             if (agent) setActiveAgentTab(groupJid, agent.id);
           });
         }}

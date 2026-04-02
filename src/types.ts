@@ -53,6 +53,8 @@ export interface RegisteredGroup {
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled'; // 消息门控模式（默认 'auto'，兼容 require_mention）
   mcp_mode?: 'inherit' | 'custom'; // MCP 配置模式（默认 'inherit' 继承用户配置）
   selected_mcps?: string[] | null; // custom 模式下选中的 MCP server IDs
+  default_runtime?: 'claude' | 'codex';
+  default_model?: string;
 }
 
 export interface GroupMember {
@@ -302,6 +304,10 @@ export interface SubAgent {
   last_im_jid: string | null;
   /** 发起 /spawn 命令的源会话 JID，用于完成后结果回注 */
   spawned_from_jid: string | null;
+  /** AI runtime for this agent/conversation: 'claude' | 'codex' */
+  agent_runtime?: string;
+  /** Per-conversation model override (e.g. 'opus', 'sonnet', 'gpt-5.4') */
+  agent_model?: string;
 }
 
 // WebSocket message types

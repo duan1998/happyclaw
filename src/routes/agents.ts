@@ -22,6 +22,7 @@ import {
   getJidsByFolder,
   updateAgentLastImJid,
   updateAgentInfo,
+  updateAgentModel,
   updateChatName,
 } from '../db.js';
 import { DATA_DIR } from '../config.js';
@@ -58,6 +59,8 @@ router.get('/:jid/agents', authMiddleware, async (c) => {
         created_at: a.created_at,
         completed_at: a.completed_at,
         result_summary: a.result_summary,
+        agent_runtime: a.agent_runtime ?? 'claude',
+        agent_model: a.agent_model ?? undefined,
       };
       if (a.kind === 'conversation') {
         const linked = getGroupsByTargetAgent(a.id);
@@ -95,6 +98,14 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
   }
   const description =
     typeof body.description === 'string' ? body.description.trim() : '';
+  const agentRuntime =
+    typeof body.agent_runtime === 'string' && (body.agent_runtime === 'claude' || body.agent_runtime === 'codex')
+      ? body.agent_runtime
+      : 'claude';
+  const agentModel =
+    typeof body.agent_model === 'string' && body.agent_model.trim()
+      ? body.agent_model.trim()
+      : undefined;
 
   const agentId = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -113,6 +124,8 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
     result_summary: null,
     last_im_jid: null,
     spawned_from_jid: null,
+    agent_runtime: agentRuntime,
+    agent_model: agentModel,
   };
 
   createAgent(agent);
@@ -142,11 +155,13 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
       status: agent.status,
       kind: agent.kind,
       created_at: agent.created_at,
+      agent_runtime: agent.agent_runtime ?? 'claude',
+      agent_model: agent.agent_model ?? undefined,
     },
   });
 });
 
-// PATCH /api/groups/:jid/agents/:agentId — rename a conversation agent
+// PATCH /api/groups/:jid/agents/:agentId — update a conversation agent (name, model, runtime)
 router.patch('/:jid/agents/:agentId', authMiddleware, async (c) => {
   const jid = decodeURIComponent(c.req.param('jid'));
   const agentId = c.req.param('agentId');
@@ -166,24 +181,53 @@ router.patch('/:jid/agents/:agentId', authMiddleware, async (c) => {
   }
 
   const body = await c.req.json().catch(() => ({}));
-  const name = typeof body.name === 'string' ? body.name.trim() : '';
-  if (!name || name.length > 40) {
-    return c.json({ error: 'Name is required (max 40 chars)' }, 400);
+
+  // Handle name update
+  const hasName = typeof body.name === 'string' && body.name.trim();
+  if (hasName) {
+    const name = body.name.trim();
+    if (name.length > 40) {
+      return c.json({ error: 'Name max 40 chars' }, 400);
+    }
+    updateAgentInfo(agentId, name, agent.prompt);
+    const virtualChatJid = `${jid}#agent:${agentId}`;
+    updateChatName(virtualChatJid, name);
   }
 
-  // Update agent name in DB
-  updateAgentInfo(agentId, name, agent.prompt);
+  // Handle model/runtime update
+  const newRuntime =
+    typeof body.agent_runtime === 'string' && (body.agent_runtime === 'claude' || body.agent_runtime === 'codex')
+      ? body.agent_runtime
+      : undefined;
+  const newModel =
+    typeof body.agent_model === 'string'
+      ? (body.agent_model.trim() || null)
+      : undefined;
 
-  // Update virtual chat name
-  const virtualChatJid = `${jid}#agent:${agentId}`;
-  updateChatName(virtualChatJid, name);
+  if (newRuntime !== undefined || newModel !== undefined) {
+    updateAgentModel(agentId, newRuntime, newModel);
+  }
 
   // Broadcast update via WebSocket
+  const updatedAgent = getAgent(agentId);
   const { broadcastAgentStatus } = await import('../web.js');
-  broadcastAgentStatus(jid, agentId, agent.status as import('../types.js').AgentStatus, name, agent.prompt);
+  broadcastAgentStatus(
+    jid, agentId,
+    (updatedAgent?.status ?? agent.status) as import('../types.js').AgentStatus,
+    updatedAgent?.name ?? agent.name,
+    updatedAgent?.prompt ?? agent.prompt,
+  );
 
-  logger.info({ agentId, jid, name, userId: user.id }, 'Agent renamed');
-  return c.json({ success: true });
+  logger.info({ agentId, jid, newRuntime, newModel, userId: user.id }, 'Agent updated');
+  return c.json({
+    success: true,
+    agent: updatedAgent ? {
+      id: updatedAgent.id,
+      name: updatedAgent.name,
+      agent_runtime: updatedAgent.agent_runtime ?? 'claude',
+      agent_model: updatedAgent.agent_model ?? undefined,
+    } : undefined,
+  });
 });
 
 // DELETE /api/groups/:jid/agents/:agentId — stop and delete an agent

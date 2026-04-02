@@ -106,13 +106,29 @@ function stopBackend() {
   }
 }
 
+function getAppIcon() {
+  const candidates = [
+    path.join(__dirname, 'icon.png'),
+    path.join(process.resourcesPath || __dirname, 'icon.png'),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      const img = nativeImage.createFromPath(p);
+      if (!img.isEmpty()) return img;
+    }
+  }
+  return null;
+}
+
 function createWindow() {
+  const icon = getAppIcon();
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 800,
     minHeight: 600,
     title: 'HappyClaw',
+    icon: icon || undefined,
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: false,
@@ -135,17 +151,13 @@ function createWindow() {
 }
 
 function createTray() {
-  const iconPath = path.join(__dirname, 'icon.png');
-  let icon;
-  if (fs.existsSync(iconPath)) {
-    icon = nativeImage.createFromPath(iconPath);
-  } else {
-    icon = nativeImage.createEmpty();
+  const icon = getAppIcon();
+  if (!icon) {
+    console.warn('[Desktop] No tray icon found, skipping tray creation');
+    return;
   }
 
-  tray = new Tray(icon.isEmpty() ? nativeImage.createFromDataURL(
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABhSURBVFhH7c4xDQAwDASxfyj0r4BYDMVkeg3SObb/dj677/Zz7tzHv+fe/vB7/seAEQOyBmQNyBqQNSBrQNaArAFZA7IGZA3IGpA1IGtA1oCsAVkDsgZkDcgakP3/dvYC/TARX+vMVZoAAAAASUVORK5CYII='
-  ) : icon);
+  tray = new Tray(icon.resize({ width: 16, height: 16 }));
 
   const contextMenu = Menu.buildFromTemplate([
     {
@@ -188,39 +200,53 @@ function isPortInUse(port) {
   });
 }
 
-app.on('ready', async () => {
-  createTray();
-
-  const alreadyRunning = await isPortInUse(PORT);
-  if (alreadyRunning) {
-    console.log(`[Desktop] Port ${PORT} already in use, connecting to existing service`);
-  } else {
-    startBackend();
-    try {
-      await waitForPort(PORT);
-    } catch (err) {
-      dialog.showErrorBox('HappyClaw', `Failed to start backend service: ${err.message}`);
-      isQuitting = true;
-      stopBackend();
-      app.quit();
-      return;
+// Single instance lock — prevent multiple copies
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
     }
-  }
+  });
 
-  createWindow();
-});
+  app.on('ready', async () => {
+    createTray();
 
-app.on('window-all-closed', (e) => {
-  // Don't quit — keep running in tray
-});
+    const alreadyRunning = await isPortInUse(PORT);
+    if (alreadyRunning) {
+      console.log(`[Desktop] Port ${PORT} already in use, connecting to existing service`);
+    } else {
+      startBackend();
+      try {
+        await waitForPort(PORT);
+      } catch (err) {
+        dialog.showErrorBox('HappyClaw', `Failed to start backend service: ${err.message}`);
+        isQuitting = true;
+        stopBackend();
+        app.quit();
+        return;
+      }
+    }
 
-app.on('activate', () => {
-  if (mainWindow) {
-    mainWindow.show();
-  }
-});
+    createWindow();
+  });
 
-app.on('before-quit', () => {
-  isQuitting = true;
-  stopBackend();
-});
+  app.on('window-all-closed', () => {
+    // Don't quit — keep running in tray
+  });
+
+  app.on('activate', () => {
+    if (mainWindow) {
+      mainWindow.show();
+    }
+  });
+
+  app.on('before-quit', () => {
+    isQuitting = true;
+    stopBackend();
+  });
+}

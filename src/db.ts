@@ -661,6 +661,10 @@ export function initDatabase(): void {
   ensureColumn('messages', 'sdk_message_uuid', 'TEXT');
   ensureColumn('messages', 'source_kind', 'TEXT');
   ensureColumn('messages', 'finalization_reason', 'TEXT');
+  ensureColumn('registered_groups', 'default_runtime', "TEXT DEFAULT 'claude'");
+  ensureColumn('registered_groups', 'default_model', 'TEXT');
+  ensureColumn('agents', 'agent_runtime', "TEXT DEFAULT 'claude'");
+  ensureColumn('agents', 'agent_model', 'TEXT');
 
   // Add index on target_agent_id for fast lookup of IM bindings
   db.exec(
@@ -2210,6 +2214,8 @@ type RegisteredGroupRow = {
   activation_mode: string | null;
   mcp_mode: string | null;
   selected_mcps: string | null;
+  default_runtime: string | null;
+  default_model: string | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -2235,6 +2241,8 @@ function parseGroupRow(
     reply_policy: row.reply_policy === 'mirror' ? 'mirror' : 'source_only',
     require_mention: row.require_mention === 1,
     activation_mode: parseActivationMode(row.activation_mode),
+    default_runtime: row.default_runtime === 'codex' ? 'codex' : 'claude',
+    default_model: row.default_model ?? undefined,
   };
 }
 
@@ -2265,8 +2273,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, default_runtime, default_model)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2287,6 +2295,8 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     group.activation_mode ?? 'auto',
     'inherit', // mcp_mode: deprecated, always inherit (user-level MCP applies globally)
     null, // selected_mcps: deprecated, always null
+    group.default_runtime ?? 'claude',
+    group.default_model ?? null,
   );
 }
 
@@ -3770,8 +3780,8 @@ export function getUserMemberFolders(
 
 export function createAgent(agent: SubAgent): void {
   db.prepare(
-    `INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary, spawned_from_jid)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO agents (id, group_folder, chat_jid, name, prompt, status, kind, created_by, created_at, completed_at, result_summary, spawned_from_jid, agent_runtime, agent_model)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     agent.id,
     agent.group_folder,
@@ -3785,6 +3795,8 @@ export function createAgent(agent: SubAgent): void {
     agent.completed_at ?? null,
     agent.result_summary ?? null,
     agent.spawned_from_jid ?? null,
+    agent.agent_runtime ?? 'claude',
+    agent.agent_model ?? null,
   );
 }
 
@@ -3844,6 +3856,26 @@ export function updateAgentInfo(
     prompt,
     id,
   );
+}
+
+export function updateAgentModel(
+  id: string,
+  agentRuntime?: string,
+  agentModel?: string | null,
+): void {
+  if (agentRuntime !== undefined && agentModel !== undefined) {
+    db.prepare('UPDATE agents SET agent_runtime = ?, agent_model = ? WHERE id = ?').run(
+      agentRuntime, agentModel, id,
+    );
+  } else if (agentRuntime !== undefined) {
+    db.prepare('UPDATE agents SET agent_runtime = ? WHERE id = ?').run(
+      agentRuntime, id,
+    );
+  } else if (agentModel !== undefined) {
+    db.prepare('UPDATE agents SET agent_model = ? WHERE id = ?').run(
+      agentModel, id,
+    );
+  }
 }
 
 export function deleteCompletedAgents(beforeTimestamp: string): number {
@@ -3939,6 +3971,10 @@ function mapAgentRow(row: Record<string, unknown>): SubAgent {
       typeof row.last_im_jid === 'string' ? row.last_im_jid : null,
     spawned_from_jid:
       typeof row.spawned_from_jid === 'string' ? row.spawned_from_jid : null,
+    agent_runtime:
+      typeof row.agent_runtime === 'string' ? row.agent_runtime : 'claude',
+    agent_model:
+      typeof row.agent_model === 'string' ? row.agent_model : undefined,
   };
 }
 

@@ -2377,4 +2377,66 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
   );
 });
 
+// ─── Codex Provider Configuration ───────────────────────────────────────
+
+import {
+  toPublicCodexConfig,
+  saveCodexProviderConfig,
+  detectLocalCodex,
+  importLocalCodex,
+} from '../codex-config.js';
+import {
+  getAllRuntimes,
+} from '../agent-runtime.js';
+
+// GET /api/config/codex — get Codex provider config (sanitized)
+configRoutes.get('/codex', authMiddleware, systemConfigMiddleware, (c) => {
+  return c.json(toPublicCodexConfig());
+});
+
+// PUT /api/config/codex — save Codex provider config
+configRoutes.put('/codex', authMiddleware, systemConfigMiddleware, async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const updates: Record<string, unknown> = {};
+
+  if (typeof body.authMode === 'string' && (body.authMode === 'chatgpt' || body.authMode === 'api_key')) {
+    updates.authMode = body.authMode;
+  }
+  if (typeof body.apiKey === 'string') {
+    updates.apiKey = body.apiKey || null;
+  }
+  if (typeof body.model === 'string' && body.model.trim()) {
+    updates.model = body.model.trim();
+  }
+  if (typeof body.codexCommand === 'string' && body.codexCommand.trim()) {
+    updates.codexCommand = body.codexCommand.trim();
+  }
+
+  saveCodexProviderConfig(updates as Parameters<typeof saveCodexProviderConfig>[0]);
+  return c.json({ success: true });
+});
+
+// GET /api/config/codex/local-detect — detect local Codex installation
+configRoutes.get('/codex/local-detect', authMiddleware, systemConfigMiddleware, (c) => {
+  return c.json(detectLocalCodex());
+});
+
+// POST /api/config/codex/import-local — import local Codex config
+configRoutes.post('/codex/import-local', authMiddleware, systemConfigMiddleware, (c) => {
+  const result = importLocalCodex();
+  if (!result.success) {
+    return c.json({ error: result.error }, 400);
+  }
+  return c.json({ success: true, config: toPublicCodexConfig() });
+});
+
+// ─── Agent Runtime Configuration ─────────────────────────────────────────
+
+// GET /api/config/agent-runtimes — list available runtimes (informational only)
+configRoutes.get('/agent-runtimes', authMiddleware, systemConfigMiddleware, (c) => {
+  return c.json({
+    runtimes: getAllRuntimes().map((r) => ({ id: r.id, label: r.label })),
+  });
+});
+
 export default configRoutes;

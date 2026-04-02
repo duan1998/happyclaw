@@ -52,7 +52,11 @@ function getHostSyncManifestPath(userId: string): string {
 }
 
 function validateServerId(id: string): boolean {
-  return /^[\w\-]+$/.test(id) && id !== 'happyclaw';
+  return /^[\w\- ]+$/.test(id) && id !== 'happyclaw';
+}
+
+function sanitizeServerId(id: string): string {
+  return id.replace(/\s+/g, '-');
 }
 
 async function readMcpServersFile(userId: string): Promise<McpServersFile> {
@@ -303,40 +307,34 @@ mcpServersRoutes.delete('/:id', authMiddleware, async (c) => {
 });
 
 // POST /sync-host — sync from host MCP configs (admin only)
-// Reads from both ~/.claude/settings.json and ~/.claude.json
+// Reads from ~/.claude/settings.json, ~/.claude.json, and ~/.cursor/mcp.json
 mcpServersRoutes.post('/sync-host', authMiddleware, async (c) => {
   const authUser = c.get('user') as AuthUser;
   if (authUser.role !== 'admin') {
     return c.json({ error: 'Only admin can sync host MCP servers' }, 403);
   }
 
-  // Read MCP servers from both config file locations
+  // Read MCP servers from all known config file locations
   let hostServers: Record<string, any> = {};
 
-  // Source 1: ~/.claude/settings.json
-  const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-  try {
-    const raw = await fs.readFile(settingsPath, 'utf-8');
-    const settings = JSON.parse(raw);
-    if (settings.mcpServers) {
-      hostServers = { ...hostServers, ...settings.mcpServers };
-    }
-  } catch {
-    // File may not exist, that's OK
-  }
+  const configSources = [
+    // Claude Code configs
+    path.join(os.homedir(), '.claude', 'settings.json'),
+    path.join(os.homedir(), '.claude.json'),
+    // Cursor IDE config
+    path.join(os.homedir(), '.cursor', 'mcp.json'),
+  ];
 
-  // Source 2: ~/.claude.json (global Claude Code config, stores per-user MCP settings)
-  // When both files define the same server ID, ~/.claude.json wins because it's
-  // the primary user-facing config file where Claude Code persists MCP settings.
-  const globalConfigPath = path.join(os.homedir(), '.claude.json');
-  try {
-    const raw = await fs.readFile(globalConfigPath, 'utf-8');
-    const config = JSON.parse(raw);
-    if (config.mcpServers) {
-      hostServers = { ...hostServers, ...config.mcpServers };
+  for (const configPath of configSources) {
+    try {
+      const raw = await fs.readFile(configPath, 'utf-8');
+      const config = JSON.parse(raw);
+      if (config.mcpServers && typeof config.mcpServers === 'object') {
+        hostServers = { ...hostServers, ...config.mcpServers };
+      }
+    } catch {
+      // File may not exist, that's OK
     }
-  } catch {
-    // File may not exist, that's OK
   }
 
   if (Object.keys(hostServers).length === 0) {
@@ -358,14 +356,16 @@ mcpServersRoutes.post('/sync-host', authMiddleware, async (c) => {
   const newSyncedList: string[] = [];
 
   // Add/update from host
-  for (const [id, hostEntry] of Object.entries(hostServers) as [
+  for (const [rawId, hostEntry] of Object.entries(hostServers) as [
     string,
     any,
   ][]) {
-    if (!validateServerId(id)) {
+    if (!validateServerId(rawId)) {
       stats.skipped++;
       continue;
     }
+
+    const id = sanitizeServerId(rawId);
 
     const existsInUser = !!file.servers[id];
     const wasSynced = previouslySynced.has(id);
@@ -376,7 +376,11 @@ mcpServersRoutes.post('/sync-host', authMiddleware, async (c) => {
       continue;
     }
 
-    const isHttpType = hostEntry.type === 'http' || hostEntry.type === 'sse';
+    // Detect HTTP/SSE: explicit type field, or url present without command (Cursor format)
+    const isHttpType =
+      hostEntry.type === 'http' ||
+      hostEntry.type === 'sse' ||
+      (hostEntry.url && !hostEntry.command);
 
     const entry: McpServerEntry = {
       enabled: true,
@@ -387,9 +391,10 @@ mcpServersRoutes.post('/sync-host', authMiddleware, async (c) => {
     };
 
     if (isHttpType) {
-      entry.type = hostEntry.type;
+      entry.type = hostEntry.type || 'sse';
       entry.url = hostEntry.url || '';
-      if (hostEntry.headers) entry.headers = hostEntry.headers;
+      if (hostEntry.headers && Object.keys(hostEntry.headers).length > 0)
+        entry.headers = hostEntry.headers;
     } else {
       entry.command = hostEntry.command || '';
       if (hostEntry.args) entry.args = hostEntry.args;

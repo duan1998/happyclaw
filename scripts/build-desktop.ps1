@@ -26,24 +26,24 @@ Write-Host "[1/2] Installing Electron dependencies..." -ForegroundColor Yellow
 Set-Location (Join-Path $root "desktop")
 npm install 2>&1 | Write-Host
 
-# Build exe
+# Build unpacked app
 Write-Host ""
-Write-Host "[2/2] Building exe..." -ForegroundColor Yellow
+Write-Host "[2/3] Building app..." -ForegroundColor Yellow
+$savedPref = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 npx electron-builder --win 2>&1 | Write-Host
+$ErrorActionPreference = $savedPref
 
-# Report result
-$exePath = Get-ChildItem -Path (Join-Path $root "desktop\release") -Filter "HappyClaw.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($exePath) {
-    $sizeMB = [math]::Round($exePath.Length / 1MB, 1)
-    Write-Host ""
-    Write-Host "=== Done! ===" -ForegroundColor Cyan
-    Write-Host "Exe: $($exePath.FullName) ($sizeMB MB)" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "To distribute:" -ForegroundColor White
-    Write-Host "  1. Copy HappyClaw.exe to colleague"
-    Write-Host "  2. Colleague creates .env with ANTHROPIC_API_KEY next to the exe"
-    Write-Host "  3. Double-click HappyClaw.exe"
-} else {
-    Write-Host "[ERROR] Build failed — exe not found in desktop\release\" -ForegroundColor Red
+$unpackedDir = Join-Path $root "desktop\release\win-unpacked"
+if (!(Test-Path (Join-Path $unpackedDir "HappyClaw.exe"))) {
+    Write-Host "[ERROR] Build failed — win-unpacked\HappyClaw.exe not found" -ForegroundColor Red
     exit 1
 }
+Write-Host ""
+Write-Host "=== Done! ===" -ForegroundColor Cyan
+Write-Host "Output: $unpackedDir" -ForegroundColor Green
+Write-Host ""
+Write-Host "To distribute:" -ForegroundColor White
+Write-Host "  1. Zip win-unpacked/ folder and send to colleague"
+Write-Host "  2. Colleague unzips, creates .env with ANTHROPIC_API_KEY next to HappyClaw.exe"
+Write-Host "  3. Double-click HappyClaw.exe"

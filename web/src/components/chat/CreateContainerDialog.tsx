@@ -36,6 +36,7 @@ export function CreateContainerDialog({
 }: CreateContainerDialogProps) {
   const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
+  const [defaultRuntime, setDefaultRuntime] = useState<'claude' | 'codex'>('claude');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [executionMode, setExecutionMode] = useState<'container' | 'host'>('container');
   const [customCwd, setCustomCwd] = useState('');
@@ -48,6 +49,7 @@ export function CreateContainerDialog({
 
   const reset = () => {
     setName('');
+    setDefaultRuntime('claude');
     setAdvancedOpen(false);
     setExecutionMode('container');
     setCustomCwd('');
@@ -68,6 +70,7 @@ export function CreateContainerDialog({
     setLoading(true);
     try {
       const options: Record<string, string> = {};
+      options.default_runtime = defaultRuntime;
       if (executionMode === 'host') {
         options.execution_mode = 'host';
         if (customCwd.trim()) options.custom_cwd = customCwd.trim();
@@ -78,7 +81,7 @@ export function CreateContainerDialog({
           options.init_git_url = initGitUrl.trim();
         }
       }
-      const created = await createFlow(trimmed, Object.keys(options).length ? options : undefined);
+      const created = await createFlow(trimmed, options);
       if (created) {
         onCreated(created.jid, created.folder);
         handleClose();
@@ -110,6 +113,37 @@ export function CreateContainerDialog({
               placeholder="输入工作区名称"
               autoFocus
             />
+          </div>
+
+          {/* Runtime selector */}
+          <div>
+            <label className="block text-sm font-medium mb-2">主对话运行时</label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setDefaultRuntime('claude')}
+                className={`flex items-center gap-2 px-3 py-2.5 rounded-lg border-2 text-sm font-medium transition-all cursor-pointer ${
+                  defaultRuntime === 'claude'
+                    ? 'border-violet-500 bg-violet-50 dark:bg-violet-950/30 text-violet-700 dark:text-violet-300'
+                    : 'border-border text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                <span className="w-2.5 h-2.5 rounded-full bg-violet-500 flex-shrink-0" />
+                Claude
+              </button>
+              <button
+                type="button"
+                onClick={() => setDefaultRuntime('codex')}
+                className={`flex items-center gap-2 px-3 py-2.5 rounded-lg border-2 text-sm font-medium transition-all cursor-pointer ${
+                  defaultRuntime === 'codex'
+                    ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300'
+                    : 'border-border text-muted-foreground hover:bg-muted'
+                }`}
+              >
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 flex-shrink-0" />
+                Codex
+              </button>
+            </div>
           </div>
 
           {/* Advanced options */}

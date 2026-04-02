@@ -20,17 +20,22 @@
     "win": {
       "target": [
         {
-          "target": "portable",
+          "target": "dir",
           "arch": ["x64"]
         }
       ],
       "signAndEditExecutable": false,
       "forceCodeSigning": false
     },
-    "portable": {
-      "artifactName": "HappyClaw.exe"
-    },
+    "files": [
+      "main.js",
+      "icon.png"
+    ],
     "extraResources": [
+      {
+        "from": "icon.png",
+        "to": "icon.png"
+      },
       {
         "from": "../happyclaw-portable/dist",
         "to": "app-backend/dist"

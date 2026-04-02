@@ -132,6 +132,8 @@ export const GroupCreateSchema = z.object({
     .string()
     .optional()
     .transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  default_runtime: z.enum(['claude', 'codex']).optional(),
+  default_model: z.string().max(100).optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
 });
 
 export const GroupMemberAddSchema = z.object({
@@ -195,6 +197,8 @@ export const GroupPatchSchema = z.object({
     .enum(['auto', 'always', 'when_mentioned', 'disabled'])
     .optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
+  default_runtime: z.enum(['claude', 'codex']).optional(),
+  default_model: z.string().max(100).optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
 });
 
 export const LoginSchema = z.object({

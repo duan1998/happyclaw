@@ -4,6 +4,7 @@ import { successTap } from '../../hooks/useHaptic';
 import {
   ArrowUp,
   Brush,
+  ChevronDown,
   FileUp,
   FolderUp,
   X,
@@ -33,12 +34,22 @@ interface PendingImage {
 /** 单张图片大小上限 5MB */
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 
+const CLAUDE_MODELS = ['opus[1m]', 'opus', 'sonnet[1m]', 'sonnet', 'haiku'] as const;
+const CODEX_MODELS = ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex'] as const;
+
+export interface ModelSelectorInfo {
+  agentRuntime: 'claude' | 'codex';
+  agentModel?: string;
+}
+
 interface MessageInputProps {
   onSend: (content: string, attachments?: Array<{ data: string; mimeType: string }>) => void;
   groupJid?: string;
   disabled?: boolean;
   onResetSession?: () => void;
   onToggleTerminal?: () => void;
+  modelInfo?: ModelSelectorInfo;
+  onModelChange?: (model: string) => void;
 }
 
 export function MessageInput({
@@ -47,9 +58,12 @@ export function MessageInput({
   disabled = false,
   onResetSession,
   onToggleTerminal,
+  modelInfo,
+  onModelChange,
 }: MessageInputProps) {
   const [content, setContent] = useState('');
   const [showActions, setShowActions] = useState(false);
+  const [showModelMenu, setShowModelMenu] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [sending, setSending] = useState(false);
@@ -60,8 +74,21 @@ export function MessageInput({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const prevGroupJidRef = useRef<string | undefined>(groupJid);
+
+  // Close model menu on outside click
+  useEffect(() => {
+    if (!showModelMenu) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (modelMenuRef.current && !modelMenuRef.current.contains(e.target as Node)) {
+        setShowModelMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showModelMenu]);
 
   const { uploadFiles, uploading, uploadProgress } = useFileStore();
   const { drafts, saveDraft, clearDraft } = useChatStore();
@@ -651,6 +678,49 @@ export function MessageInput({
 
             {/* Spacer */}
             <div className="flex-1" />
+
+            {/* Model selector */}
+            {modelInfo && onModelChange && (
+              <div className="relative" ref={modelMenuRef}>
+                <button
+                  type="button"
+                  onClick={() => setShowModelMenu(!showModelMenu)}
+                  className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                    showModelMenu
+                      ? 'bg-accent text-accent-foreground'
+                      : 'hover:bg-muted text-muted-foreground hover:text-foreground/70'
+                  }`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                    modelInfo.agentRuntime === 'codex' ? 'bg-emerald-500' : 'bg-violet-500'
+                  }`} />
+                  <span className="max-w-[120px] truncate">
+                    {modelInfo.agentModel || '默认'}
+                  </span>
+                  <ChevronDown className="w-3 h-3 flex-shrink-0" />
+                </button>
+
+                {showModelMenu && (
+                  <div className="absolute bottom-full right-0 mb-1 w-48 rounded-lg border border-border bg-popover shadow-lg overflow-hidden z-50 animate-in fade-in-0 slide-in-from-bottom-2 duration-150">
+                    <div className="max-h-60 overflow-y-auto py-1">
+                      {(modelInfo.agentRuntime === 'codex' ? CODEX_MODELS : CLAUDE_MODELS).map((m) => (
+                        <button
+                          key={m}
+                          onClick={() => { onModelChange(m); setShowModelMenu(false); }}
+                          className={`w-full px-3 py-1.5 text-left text-sm transition-colors cursor-pointer ${
+                            modelInfo.agentModel === m
+                              ? 'bg-accent text-accent-foreground font-medium'
+                              : 'text-foreground/80 hover:bg-muted'
+                          }`}
+                        >
+                          {m}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Right: send button */}
             <button

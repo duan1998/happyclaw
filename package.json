@@ -27,6 +27,7 @@
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^11.8.1",
     "cron-parser": "^5.5.0",
+    "cross-spawn": "^7.0.6",
     "dingtalk-stream": "2.1.6-beta.1",
     "grammy": "^1.40.0",
     "hono": "^4.11.9",
@@ -41,6 +42,7 @@
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
     "@types/better-sqlite3": "^7.6.12",
+    "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.18.1",
     "concurrently": "^9.2.1",

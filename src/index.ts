@@ -25,6 +25,7 @@ import {
   ContainerOutput,
   runContainerAgent,
   runHostAgent,
+  runCodexHostAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -3430,20 +3431,36 @@ async function runAgent(
 
     let output: ContainerOutput;
 
-    if (executionMode === 'host') {
+    const mainRuntime = group.default_runtime || 'claude';
+    const containerInput: ContainerInput = {
+      prompt,
+      sessionId,
+      turnId,
+      groupFolder: group.folder,
+      chatJid,
+      isMain: isAdminHome,
+      isHome,
+      isAdminHome,
+      images,
+    };
+
+    if (mainRuntime === 'codex' && executionMode === 'host') {
+      output = await runCodexHostAgent(
+        group,
+        containerInput,
+        onProcessCb,
+        wrappedOnOutput,
+      );
+    } else if (mainRuntime === 'codex' && executionMode !== 'host') {
+      logger.warn({ group: group.folder }, 'Codex runtime only supports host execution mode; falling back to error');
+      output = {
+        status: 'error',
+        result: 'Codex runtime 目前仅支持宿主机(host)执行模式，请在工作区设置中切换为 host 模式，或将默认 runtime 改为 Claude。',
+      };
+    } else if (executionMode === 'host') {
       output = await runHostAgent(
         group,
-        {
-          prompt,
-          sessionId,
-          turnId,
-          groupFolder: group.folder,
-          chatJid,
-          isMain: isAdminHome,
-          isHome,
-          isAdminHome,
-          images,
-        },
+        containerInput,
         onProcessCb,
         wrappedOnOutput,
         ownerHomeFolder,
@@ -3451,17 +3468,7 @@ async function runAgent(
     } else {
       output = await runContainerAgent(
         group,
-        {
-          prompt,
-          sessionId,
-          turnId,
-          groupFolder: group.folder,
-          chatJid,
-          isMain: isAdminHome,
-          isHome,
-          isAdminHome,
-          images,
-        },
+        containerInput,
         onProcessCb,
         wrappedOnOutput,
         ownerHomeFolder,
@@ -5458,6 +5465,7 @@ async function processAgentConversation(
       isAdminHome,
       agentId,
       agentName: agent.name,
+      agentModel: agent.agent_model || undefined,
       images: imagesForAgent,
     };
 
@@ -5487,7 +5495,22 @@ async function processAgentConversation(
     const ownerHomeFolder = resolveOwnerHomeFolder(effectiveGroup);
 
     let output: ContainerOutput;
-    if (executionMode === 'host') {
+    const agentRuntime = agent.agent_runtime === 'codex' ? 'codex' : 'claude';
+
+    if (agentRuntime === 'codex' && executionMode === 'host') {
+      output = await runCodexHostAgent(
+        effectiveGroup,
+        containerInput,
+        onProcessCb,
+        wrappedOnOutput,
+      );
+    } else if (agentRuntime === 'codex' && executionMode !== 'host') {
+      logger.warn({ agent: agent.id }, 'Codex runtime only supports host execution mode; returning error');
+      output = {
+        status: 'error',
+        result: 'Codex runtime 目前仅支持宿主机(host)执行模式，请在工作区设置中切换为 host 模式，或将对话 runtime 改为 Claude。',
+      };
+    } else if (executionMode === 'host') {
       output = await runHostAgent(
         effectiveGroup,
         containerInput,

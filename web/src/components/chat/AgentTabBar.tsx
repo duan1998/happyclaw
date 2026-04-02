@@ -149,6 +149,8 @@ export function AgentTabBar({ agents, activeTab, onSelectTab, onDeleteAgent, onR
         {/* Conversation tabs — same visual level as main */}
         {conversations.map((agent) => {
           const hasLinked = agent.linked_im_groups && agent.linked_im_groups.length > 0;
+          const runtimeColor = agent.agent_runtime === 'codex' ? 'bg-emerald-500' : 'bg-violet-500';
+          const runtimeLabel = agent.agent_runtime === 'codex' ? 'Codex' : 'Claude';
           return (
             <div
               key={agent.id}
@@ -159,8 +161,10 @@ export function AgentTabBar({ agents, activeTab, onSelectTab, onDeleteAgent, onR
               onTouchEnd={handleTouchEnd}
               onTouchMove={handleTouchEnd}
             >
-              {agent.status === 'running' && (
+              {agent.status === 'running' ? (
                 <span className="w-1.5 h-1.5 rounded-full bg-teal-500 animate-pulse flex-shrink-0" />
+              ) : (
+                <span className={`w-1.5 h-1.5 rounded-full ${runtimeColor} flex-shrink-0`} title={`Runtime: ${runtimeLabel}`} />
               )}
               {hasLinked && (
                 <span title={`已绑定: ${agent.linked_im_groups!.map(g => g.name).join(', ')}`}>
@@ -168,6 +172,9 @@ export function AgentTabBar({ agents, activeTab, onSelectTab, onDeleteAgent, onR
                 </span>
               )}
               <span className="truncate max-w-[120px]">{agent.name}</span>
+              {agent.agent_model && (
+                <span className="text-[10px] text-muted-foreground/70 flex-shrink-0">{agent.agent_model}</span>
+              )}
               {onBindIm && (
                 <button
                   onClick={(e) => { e.stopPropagation(); onBindIm(agent.id); }}
