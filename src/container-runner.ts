@@ -1330,7 +1330,7 @@ export async function runCodexHostAgent(
   onProcess: (proc: ChildProcess, identifier: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
-  const { getCodexProviderConfig, writeSessionCodexAuth, writeSessionCodexConfig, isCodexAuthAvailable } = await import('./codex-config.js');
+  const { getCodexProviderConfig, writeSessionCodexAuth, writeSessionCodexConfig, isCodexAuthAvailable, readCodexMemory, appendCodexMemory, buildCodexMemoryPrompt } = await import('./codex-config.js');
 
   const config = getCodexProviderConfig();
   const startTime = Date.now();
@@ -1384,7 +1384,20 @@ export async function runCodexHostAgent(
     args.push('resume', input.sessionId);
   }
 
-  args.push(input.prompt);
+  // Fresh session: inject conversation memory so Codex has prior context
+  let effectivePrompt = input.prompt;
+  if (!input.sessionId) {
+    const memory = readCodexMemory(group.folder);
+    if (memory && memory.exchanges.length > 0) {
+      effectivePrompt = buildCodexMemoryPrompt(memory, input.prompt);
+      logger.info(
+        { group: group.name, exchanges: memory.exchanges.length },
+        'Injecting Codex conversation memory into fresh session',
+      );
+    }
+  }
+
+  args.push(effectivePrompt);
 
   logger.info(
     { group: group.name, workingDir: groupDir, codexCmd: resolved.command, argCount: args.length,
@@ -1553,6 +1566,15 @@ export async function runCodexHostAgent(
           error: errorDetail,
         });
         return;
+      }
+
+      // Persist conversation exchange for memory across session expiry
+      if (finalText) {
+        try {
+          appendCodexMemory(group.folder, input.prompt, finalText);
+        } catch (memErr) {
+          logger.warn({ group: group.name, err: memErr }, 'Failed to persist Codex memory');
+        }
       }
 
       // Emit the final result via onOutput so processGroupMessages sets

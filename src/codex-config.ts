@@ -210,6 +210,98 @@ export function importLocalCodex(): { success: boolean; error?: string } {
   }
 }
 
+// --- Codex conversation memory (survives session expiry) ---
+
+const CODEX_MEMORY_DIR = path.join(DATA_DIR, 'codex-memory');
+const MAX_MEMORY_EXCHANGES = 10;
+const MAX_MEMORY_CHARS = 8000;
+
+interface CodexMemoryExchange {
+  timestamp: string;
+  userPrompt: string;
+  assistantResponse: string;
+}
+
+interface CodexMemory {
+  exchanges: CodexMemoryExchange[];
+}
+
+function getCodexMemoryPath(folder: string): string {
+  return path.join(CODEX_MEMORY_DIR, `${folder}.json`);
+}
+
+export function readCodexMemory(folder: string): CodexMemory | null {
+  try {
+    const raw = fs.readFileSync(getCodexMemoryPath(folder), 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+export function appendCodexMemory(
+  folder: string,
+  userPrompt: string,
+  assistantResponse: string,
+): void {
+  fs.mkdirSync(CODEX_MEMORY_DIR, { recursive: true });
+  const memory = readCodexMemory(folder) || { exchanges: [] };
+
+  const truncate = (s: string, max: number) =>
+    s.length > max ? s.slice(0, max) + '…' : s;
+
+  memory.exchanges.push({
+    timestamp: new Date().toISOString(),
+    userPrompt: truncate(userPrompt, 500),
+    assistantResponse: truncate(assistantResponse, 2000),
+  });
+
+  while (memory.exchanges.length > MAX_MEMORY_EXCHANGES) {
+    memory.exchanges.shift();
+  }
+
+  while (memory.exchanges.length > 1) {
+    const totalChars = memory.exchanges.reduce(
+      (sum, e) => sum + e.userPrompt.length + e.assistantResponse.length,
+      0,
+    );
+    if (totalChars <= MAX_MEMORY_CHARS) break;
+    memory.exchanges.shift();
+  }
+
+  const filePath = getCodexMemoryPath(folder);
+  const tmpPath = filePath + '.tmp';
+  fs.writeFileSync(tmpPath, JSON.stringify(memory, null, 2));
+  fs.renameSync(tmpPath, filePath);
+}
+
+export function buildCodexMemoryPrompt(
+  memory: CodexMemory,
+  originalPrompt: string,
+): string {
+  const lines: string[] = [
+    '[CONTEXT: This is a continued conversation. Your previous session expired, but here is a summary of recent exchanges to maintain continuity.]\n',
+  ];
+
+  for (const exchange of memory.exchanges) {
+    lines.push(`User: ${exchange.userPrompt}`);
+    lines.push(`Assistant: ${exchange.assistantResponse}`);
+    lines.push('');
+  }
+
+  lines.push('[END OF PREVIOUS CONTEXT]\n');
+  lines.push(originalPrompt);
+  return lines.join('\n');
+}
+
+export function clearCodexMemory(folder: string): void {
+  try {
+    fs.unlinkSync(getCodexMemoryPath(folder));
+  } catch {
+    /* file may not exist */
+  }
+}
+
 // --- Session-level auth/config writing (for codex exec subprocess) ---
 
 export function writeSessionCodexAuth(sessionDir: string): void {

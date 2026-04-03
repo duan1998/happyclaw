@@ -926,6 +926,11 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   deleteGroupData(jid, existing.folder);
   removeFlowArtifacts(existing.folder);
 
+  try {
+    const { clearCodexMemory } = await import('../codex-config.js');
+    clearCodexMemory(existing.folder);
+  } catch { /* non-critical */ }
+
   delete deps.getRegisteredGroups()[jid];
   delete deps.getSessions()[existing.folder];
   deps.setLastAgentTimestamp(jid, { timestamp: '', id: '' });
@@ -1108,6 +1113,14 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
       { error: 'Failed to clear session state, session not reset' },
       500,
     );
+  }
+
+  // 3b. Clear Codex conversation memory (best-effort).
+  if (!agentId) {
+    try {
+      const { clearCodexMemory } = await import('../codex-config.js');
+      clearCodexMemory(group.folder);
+    } catch { /* non-critical */ }
   }
 
   // 4. Insert system divider message into the correct JID (best-effort).

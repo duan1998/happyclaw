@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
 const CLAUDE_MODELS = ['opus[1m]', 'opus', 'sonnet[1m]', 'sonnet', 'haiku'] as const;
-const CODEX_MODELS = ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.2', 'gpt-5.1-codex-max', 'gpt-5.1-codex-mini', 'o3', 'o4-mini'] as const;
+const CODEX_MODELS = ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex'] as const;
 
 interface NewConversationDialogProps {
   open: boolean;
@@ -56,7 +56,7 @@ export function NewConversationDialog({ open, defaultRuntime, onConfirm, onClose
             <Input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleConfirm(); }}
+              onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleConfirm(); }}
               placeholder="输入对话名称"
               autoFocus
             />
