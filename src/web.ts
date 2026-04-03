@@ -1559,6 +1559,7 @@ export function broadcastAgentStatus(
   prompt: string,
   resultSummary?: string,
   kind?: import('./types.js').AgentKind,
+  metadataOnly?: boolean,
 ): void {
   const jid = normalizeHomeJid(chatJid);
   const allowedUserIds = getGroupAllowedUserIds(chatJid);
@@ -1575,8 +1576,9 @@ export function broadcastAgentStatus(
     resultSummary,
     agent_runtime: agentRecord?.agent_runtime,
     agent_model: agentRecord?.agent_model,
+    metadataOnly,
   };
-  writeDebugLog('WS_AGENT_STATUS', `id=${agentId} status=${status} runtime=${agentRecord?.agent_runtime ?? 'N/A'} model=${agentRecord?.agent_model ?? 'N/A'}`);
+  writeDebugLog('WS_AGENT_STATUS', `id=${agentId} status=${status} runtime=${agentRecord?.agent_runtime ?? 'N/A'} model=${agentRecord?.agent_model ?? 'N/A'} metadataOnly=${metadataOnly ? 'true' : 'false'}`);
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 }
 

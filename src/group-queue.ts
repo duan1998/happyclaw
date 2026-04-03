@@ -664,6 +664,10 @@ export class GroupQueue {
     // same folder as a web group) are correctly resolved to the active runner.
     const state = this.resolveActiveState(groupJid);
     if (!state) return false;
+    if (!state.queryInFlight) {
+      logger.info({ groupJid }, 'Interrupt ignored: runner active but no query in flight');
+      return false;
+    }
 
     this.clearRetryTimer(state);
 
@@ -998,10 +1002,11 @@ export class GroupQueue {
   private async runTask(groupJid: string, task: QueuedTask): Promise<void> {
     const state = this.getGroup(groupJid);
     const isHostMode = this.isHostMode(groupJid);
+    const isInterruptibleAgentConversation = groupJid.includes('#agent:');
     state.active = true;
     state.activeRunnerIsTask = true;
     state.lastActivityAt = Date.now();
-    state.queryInFlight = false;
+    state.queryInFlight = isInterruptibleAgentConversation;
     this.waitingGroups.delete(groupJid);
     this.activeCount++;
     if (isHostMode) {

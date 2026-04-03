@@ -197,7 +197,7 @@ interface ChatState {
   deleteFlow: (jid: string) => Promise<void>;
   handleStreamEvent: (chatJid: string, event: StreamEvent, agentId?: string) => void;
   handleWsNewMessage: (chatJid: string, wsMsg: any, agentId?: string, source?: string) => void;
-  handleAgentStatus: (chatJid: string, agentId: string, status: AgentInfo['status'], name: string, prompt: string, resultSummary?: string, kind?: AgentInfo['kind'], agentRuntime?: string, agentModel?: string) => void;
+  handleAgentStatus: (chatJid: string, agentId: string, status: AgentInfo['status'], name: string, prompt: string, resultSummary?: string, kind?: AgentInfo['kind'], agentRuntime?: string, agentModel?: string, metadataOnly?: boolean) => void;
   clearStreaming: (
     chatJid: string,
     options?: { preserveThinking?: boolean },
@@ -986,6 +986,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       if (!data.interrupted) {
         set({ error: 'No active query to interrupt' });
+        showToast('中断失败', '当前没有可中断的请求，可能已经回复完成了。');
         return false;
       }
 
@@ -994,7 +995,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // 随后的 new_message 事件完成最终清理（流式 → 正式消息）。
       return true;
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      set({ error: message });
+      showToast('中断失败', message || '请求未成功发送，请稍后重试。');
       return false;
     }
   },
@@ -1596,19 +1599,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => {
         const existing = s.agentMessages[agentId] || [];
         const updated = mergeMessagesChronologically(existing, [msg]);
+        const isInterruptMarker = isInterruptSystemMessage(msg);
         const isAgentReply =
           msg.is_from_me &&
           msg.sender !== '__system__' &&
           msg.source_kind !== 'sdk_send_message';
 
-        const nextAgentStreaming = isAgentReply
+        const nextAgentStreaming = (isAgentReply || isInterruptMarker)
           ? (() => { const n = { ...s.agentStreaming }; delete n[agentId]; return n; })()
           : s.agentStreaming;
 
         // For user messages (non-reply), set agentWaiting=true so subsequent
         // streaming events are accepted.  This handles messages injected from
         // Feishu/Telegram which don't go through sendAgentMessage().
-        const nextAgentWaiting = isAgentReply
+        const nextAgentWaiting = isAgentReply || isInterruptMarker
           ? { ...s.agentWaiting, [agentId]: false }
           : !msg.is_from_me
             ? { ...s.agentWaiting, [agentId]: true }
@@ -1693,7 +1697,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // 处理子 Agent 状态变更事件
-  handleAgentStatus: (chatJid, agentId, status, name, prompt, resultSummary?, kind?, agentRuntime?, agentModel?) => {
+  handleAgentStatus: (chatJid, agentId, status, name, prompt, resultSummary?, kind?, agentRuntime?, agentModel?, metadataOnly?) => {
     set((s) => {
       const existing = s.agents[chatJid] || [];
 
@@ -1788,7 +1792,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Without this, Feishu-sourced messages (which skip sendAgentMessage) would
       // leave agentWaiting=false and cause all streaming events to be dropped.
       const nextAgentWaiting =
-        (resolvedKind === 'conversation' || resolvedKind === 'spawn') && status === 'running'
+        !metadataOnly && (resolvedKind === 'conversation' || resolvedKind === 'spawn') && status === 'running'
           ? { ...s.agentWaiting, [agentId]: true }
           : s.agentWaiting;
 

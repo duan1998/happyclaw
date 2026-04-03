@@ -351,6 +351,7 @@ export type WsMessageOut =
       resultSummary?: string;
       agent_runtime?: string;
       agent_model?: string;
+      metadataOnly?: boolean;
     }
   | {
       type: 'runner_state';

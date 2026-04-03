@@ -69,6 +69,12 @@ const IPC_FALLBACK_POLL_MS = 5000; // 后备轮询间隔（仅防止 inotify 事
 
 let needsMemoryFlush = false;
 let hadCompaction = false;
+
+// When a model switch is detected during an active query, we store the pending
+// messages here instead of pushing them into the running stream. The main loop
+// picks them up after the current query finishes.
+let pendingModelSwitchMessages: { text: string; images?: Array<{ data: string; mimeType?: string }> }[] | null = null;
+let pendingModelSwitchNeedsFreshSession = false;
 // Module-level session ID so SIGTERM handler can emit it before exit.
 // Updated in main() whenever a query returns a new session.
 let latestSessionId: string | undefined;
@@ -715,6 +721,13 @@ interface IpcDrainResult {
   agentModel?: string;
 }
 
+function applyPendingAgentModel(agentModel: string | undefined, context: string): void {
+  if (agentModel && agentModel !== CLAUDE_MODEL) {
+    log(`Model switched (${context}): ${CLAUDE_MODEL} -> ${agentModel}`);
+    CLAUDE_MODEL = agentModel;
+  }
+}
+
 function drainIpcInput(): IpcDrainResult {
   const result: IpcDrainResult = { messages: [] };
   try {
@@ -1092,9 +1105,20 @@ async function runQuery(
     }
 
     const { messages, agentModel } = drainIpcInput();
-    if (agentModel && agentModel !== CLAUDE_MODEL) {
-      log(`Model switched (during query): ${CLAUDE_MODEL} -> ${agentModel}`);
+    if (agentModel && agentModel !== CLAUDE_MODEL && messages.length > 0) {
+      log(`Model switched during active query: ${CLAUDE_MODEL} -> ${agentModel}, deferring ${messages.length} message(s) to next query`);
       CLAUDE_MODEL = agentModel;
+      pendingModelSwitchNeedsFreshSession = true;
+      pendingModelSwitchMessages = messages;
+      stream.end();
+      ipcPolling = false;
+      ipcQueryWatcher.close();
+      return;
+    }
+    if (agentModel && agentModel !== CLAUDE_MODEL) {
+      log(`Model switched (during query, no message): ${CLAUDE_MODEL} -> ${agentModel}`);
+      CLAUDE_MODEL = agentModel;
+      pendingModelSwitchNeedsFreshSession = true;
     }
     for (const msg of messages) {
       log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
@@ -1731,6 +1755,7 @@ async function main(): Promise<void> {
       promptImages = [...(promptImages || []), ...pendingImages];
     }
   }
+  applyPendingAgentModel(pendingDrain.agentModel, 'before query start');
 
   // Query loop: run query -> wait for IPC message -> run new query -> repeat
   let resumeAt: string | undefined;
@@ -1738,6 +1763,16 @@ async function main(): Promise<void> {
   const MAX_OVERFLOW_RETRIES = 3;
   let consecutiveCompactions = 0;
   const MAX_CONSECUTIVE_COMPACTIONS = 3;
+  const resetSessionForModelSwitch = (context: string): void => {
+    if (sessionId || resumeAt || latestSessionId) {
+      log(`Resetting session for model switch (${context}): session=${sessionId || 'new'} resumeAt=${resumeAt || 'latest'}`);
+    } else {
+      log(`Resetting session for model switch (${context}): no existing session`);
+    }
+    sessionId = undefined;
+    latestSessionId = undefined;
+    resumeAt = undefined;
+  };
   try {
     while (true) {
       // 清理残留的 _interrupt sentinel（空闲期间写入的中断信号不应影响下一次 query）。
@@ -1766,6 +1801,10 @@ async function main(): Promise<void> {
       }
       if (queryResult.lastAssistantUuid) {
         resumeAt = queryResult.lastAssistantUuid;
+      }
+      if (pendingModelSwitchNeedsFreshSession) {
+        resetSessionForModelSwitch('after active-query model change');
+        pendingModelSwitchNeedsFreshSession = false;
       }
 
       // Session resume 失败（SDK 无法恢复旧会话）：清除 session，以新会话重试
@@ -1846,11 +1885,31 @@ async function main(): Promise<void> {
         });
         // 清理可能残留的 _interrupt 文件
         try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
+
+        // Check for deferred model-switch messages first
+        if (pendingModelSwitchMessages && pendingModelSwitchMessages.length > 0) {
+          if (shouldClose() || shouldDrain()) {
+            log('Close/drain sentinel received before deferred model-switch message after interrupt, exiting');
+            writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+            break;
+          }
+          const pending = pendingModelSwitchMessages;
+          pendingModelSwitchMessages = null;
+          const combinedText = pending.map((m) => m.text).join('\n');
+          const combinedImages = pending.flatMap((m) => m.images || []);
+          log(`Using ${pending.length} deferred model-switch message(s) after interrupt, model: ${CLAUDE_MODEL}`);
+          prompt = combinedText;
+          promptImages = combinedImages.length > 0 ? combinedImages : undefined;
+          clearInterruptRequested();
+          consecutiveCompactions = 0;
+          containerInput.turnId = generateTurnId();
+          continue;
+        }
+
         // 不 break，等待下一条消息
         const nextMessage = await waitForIpcMessage();
         if (nextMessage === null) {
           log('Close sentinel received after interrupt, exiting');
-          // 退出前发送 session 更新，确保主进程持久化最新 session ID
           writeOutput({ status: 'success', result: null, newSessionId: sessionId });
           break;
         }
@@ -2001,6 +2060,27 @@ async function main(): Promise<void> {
 
       log('Query ended, waiting for next IPC message...');
 
+      // If model was switched during the query, pick up deferred messages immediately
+      if (pendingModelSwitchMessages && pendingModelSwitchMessages.length > 0) {
+        if (shouldClose()) {
+          log('Close sentinel received before deferred model-switch message, exiting');
+          break;
+        }
+        if (shouldDrain()) {
+          log('Drain sentinel received before deferred model-switch message, exiting after completed query');
+          break;
+        }
+        const pending = pendingModelSwitchMessages;
+        pendingModelSwitchMessages = null;
+        const combinedText = pending.map((m) => m.text).join('\n');
+        const combinedImages = pending.flatMap((m) => m.images || []);
+        log(`Using ${pending.length} deferred model-switch message(s) (${combinedText.length} chars), model: ${CLAUDE_MODEL}`);
+        prompt = combinedText;
+        promptImages = combinedImages.length > 0 ? combinedImages : undefined;
+        containerInput.turnId = generateTurnId();
+        continue;
+      }
+
       // Wait for the next message or _close sentinel
       const nextMessage = await waitForIpcMessage();
       if (nextMessage === null) {
@@ -2012,6 +2092,7 @@ async function main(): Promise<void> {
       prompt = nextMessage.text;
       promptImages = nextMessage.images;
       if (nextMessage.agentModel && nextMessage.agentModel !== CLAUDE_MODEL) {
+        resetSessionForModelSwitch('before next query');
         log(`Model switched: ${CLAUDE_MODEL} -> ${nextMessage.agentModel}`);
         CLAUDE_MODEL = nextMessage.agentModel;
       }

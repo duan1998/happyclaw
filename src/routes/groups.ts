@@ -54,6 +54,7 @@ import {
   unpinGroup,
 } from '../db.js';
 import { logger } from '../logger.js';
+import { writeDebugLog } from '../debug-log.js';
 import {
   getContainerEnvConfig,
   saveContainerEnvConfig,
@@ -977,7 +978,15 @@ groupRoutes.post('/:jid/interrupt', authMiddleware, async (c) => {
     return c.json({ error: 'Group not found' }, 404);
   }
 
+  writeDebugLog(
+    'INTERRUPT_REQUEST',
+    `jid=${jid} baseJid=${baseJid} user=${authUser.id} requested=true`,
+  );
   const interrupted = deps.queue.interruptQuery(jid);
+  writeDebugLog(
+    'INTERRUPT_REQUEST',
+    `jid=${jid} baseJid=${baseJid} user=${authUser.id} interrupted=${interrupted}`,
+  );
   if (interrupted) {
     // ── 立即 abort 飞书流式卡片 ──
     const session = getStreamingSession(jid);
@@ -1013,6 +1022,10 @@ groupRoutes.post('/:jid/interrupt', authMiddleware, async (c) => {
       logger.warn(
         { jid, err },
         'Interrupt succeeded but failed to append system marker',
+      );
+      writeDebugLog(
+        'INTERRUPT_REQUEST',
+        `jid=${jid} baseJid=${baseJid} user=${authUser.id} marker_append_failed=${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

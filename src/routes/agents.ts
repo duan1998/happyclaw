@@ -207,8 +207,18 @@ router.patch('/:jid/agents/:agentId', authMiddleware, async (c) => {
       ? (body.agent_model.trim() || null)
       : undefined;
 
+  const runtimeChanged = newRuntime !== undefined && newRuntime !== (agent.agent_runtime ?? 'claude');
+  const modelChanged = newModel !== undefined && newModel !== (agent.agent_model ?? null);
+
   if (newRuntime !== undefined || newModel !== undefined) {
     updateAgentModel(agentId, newRuntime, newModel);
+    if (runtimeChanged || modelChanged) {
+      deleteSession(group.folder, agentId);
+      writeDebugLog(
+        'AGENT_UPDATE',
+        `id=${agentId} reset_session=true runtimeChanged=${runtimeChanged} modelChanged=${modelChanged}`,
+      );
+    }
   }
 
   // Broadcast update via WebSocket
@@ -219,6 +229,9 @@ router.patch('/:jid/agents/:agentId', authMiddleware, async (c) => {
     (updatedAgent?.status ?? agent.status) as import('../types.js').AgentStatus,
     updatedAgent?.name ?? agent.name,
     updatedAgent?.prompt ?? agent.prompt,
+    undefined,
+    undefined,
+    true,
   );
 
   logger.info({ agentId, jid, newRuntime, newModel, userId: user.id }, 'Agent updated');

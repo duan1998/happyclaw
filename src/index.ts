@@ -5121,6 +5121,15 @@ async function processAgentConversation(
       currentAgentSessionId = output.newSessionId;
     }
 
+    if (
+      (output.status === 'success' && output.result !== null) ||
+      (output.status === 'stream' &&
+        output.streamEvent?.eventType === 'status' &&
+        output.streamEvent.statusText === 'interrupted')
+    ) {
+      queue.markRunnerQueryIdle(virtualJid);
+    }
+
     // Stream events
     if (output.status === 'stream' && output.streamEvent) {
       broadcastStreamEvent(chatJid, output.streamEvent, agentId);
