@@ -20,6 +20,10 @@ import {
 } from './config.js';
 import { interruptibleSleep } from './message-notifier.js';
 import {
+  clearImBindingTargets,
+  shouldClearPersistedAgentRoute,
+} from './im-binding-utils.js';
+import {
   AvailableGroup,
   ContainerInput,
   ContainerOutput,
@@ -512,16 +516,21 @@ function unbindImGroup(jid: string, reason: string): void {
   if (!group?.target_agent_id && !group?.target_main_jid) return;
   const agentId = group.target_agent_id;
   const targetMainJid = group.target_main_jid;
-  const updated = {
-    ...group,
-    target_agent_id: undefined,
-    target_main_jid: undefined,
-    reply_policy: 'source_only' as const,
-  };
+  const updated = clearImBindingTargets(group);
   setRegisteredGroup(jid, updated);
   registeredGroups[jid] = updated;
   imSendFailCounts.delete(jid);
   imHealthCheckFailCounts.delete(jid);
+  if (
+    agentId &&
+    shouldClearPersistedAgentRoute({
+      oldAgentId: agentId,
+      affectedImJid: jid,
+      persistedImJid: agentId ? getAgent(agentId)?.last_im_jid : null,
+    })
+  ) {
+    updateAgentLastImJid(agentId, null);
+  }
   logger.info({ jid, agentId, targetMainJid }, reason);
 }
 
@@ -1304,6 +1313,7 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
     return '未找到目标。先用 /list 查看工作区和 agent 短 ID，再执行 /bind <workspace>/<agent短ID>';
   }
 
+  const oldAgentId = group.target_agent_id;
   const updated: RegisteredGroup = {
     ...group,
     target_agent_id: resolved.target_agent_id,
@@ -1314,6 +1324,17 @@ function handleBindCommand(chatJid: string, rawSpec: string): string {
   registeredGroups[chatJid] = updated;
   imSendFailCounts.delete(chatJid);
   imHealthCheckFailCounts.delete(chatJid);
+  if (
+    oldAgentId &&
+    shouldClearPersistedAgentRoute({
+      oldAgentId,
+      nextAgentId: resolved.target_agent_id,
+      affectedImJid: chatJid,
+      persistedImJid: oldAgentId ? getAgent(oldAgentId)?.last_im_jid : null,
+    })
+  ) {
+    updateAgentLastImJid(oldAgentId, null);
+  }
   return `已切换到 ${resolved.display}\n🔁 回复策略: source_only`;
 }
 
@@ -1350,6 +1371,7 @@ async function handleNewCommand(
   addGroupMember(folder, userId, 'owner', userId);
 
   // Bind the current IM group to the new workspace's main conversation
+  const oldAgentId = group.target_agent_id;
   const updated: RegisteredGroup = {
     ...group,
     target_main_jid: newJid,
@@ -1360,6 +1382,16 @@ async function handleNewCommand(
   registeredGroups[chatJid] = updated;
   imSendFailCounts.delete(chatJid);
   imHealthCheckFailCounts.delete(chatJid);
+  if (
+    oldAgentId &&
+    shouldClearPersistedAgentRoute({
+      oldAgentId,
+      affectedImJid: chatJid,
+      persistedImJid: oldAgentId ? getAgent(oldAgentId)?.last_im_jid : null,
+    })
+  ) {
+    updateAgentLastImJid(oldAgentId, null);
+  }
 
   return `工作区「${name}」已创建并绑定\n📁 ${folder}\n🔁 回复策略: source_only\n\n发送 /unbind 可解绑回默认工作区`;
 }
@@ -6344,7 +6376,7 @@ function buildTelegramBotAddedHandler(
 
 function buildIsChatAuthorized(userId: string): (jid: string) => boolean {
   return (jid) => {
-    const group = registeredGroups[jid];
+    const group = registeredGroups[jid] ?? getRegisteredGroup(jid);
     return !!group && group.created_by === userId;
   };
 }
@@ -6353,9 +6385,8 @@ function buildOnPairAttempt(
   userId: string,
 ): (jid: string, chatName: string, code: string) => Promise<boolean> {
   return async (jid, chatName, code) => {
-    const result = verifyPairingCode(code);
+    const result = verifyPairingCode(code, userId);
     if (!result) return false;
-    if (result.userId !== userId) return false;
     const pairingUserHome = getUserHomeGroup(result.userId);
     if (!pairingUserHome) return false;
     buildOnNewChat(result.userId, pairingUserHome.folder)(jid, chatName);

@@ -26,6 +26,10 @@ import {
   updateChatName,
 } from '../db.js';
 import { DATA_DIR } from '../config.js';
+import {
+  clearImBindingTargets,
+  shouldClearPersistedAgentRoute,
+} from '../im-binding-utils.js';
 import type { RegisteredGroup, SubAgent } from '../types.js';
 import { logger } from '../logger.js';
 import { getChannelType, extractChatId } from '../im-channel.js';
@@ -530,6 +534,7 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   }
 
   // Update DB + in-memory cache — clear target_main_jid to avoid conflicts
+  const oldAgentId = imGroup.target_agent_id;
   const updated: RegisteredGroup = {
     ...imGroup,
     target_agent_id: agentId,
@@ -540,7 +545,18 @@ router.put('/:jid/agents/:agentId/im-binding', authMiddleware, async (c) => {
   const deps = getWebDeps();
   if (deps) {
     const groups = deps.getRegisteredGroups();
-    if (groups[imJid]) groups[imJid] = updated;
+    groups[imJid] = updated;
+  }
+  if (
+    oldAgentId &&
+    shouldClearPersistedAgentRoute({
+      oldAgentId,
+      nextAgentId: agentId,
+      affectedImJid: imJid,
+      persistedImJid: oldAgentId ? getAgent(oldAgentId)?.last_im_jid : null,
+    })
+  ) {
+    updateAgentLastImJid(oldAgentId, null);
   }
 
   logger.info({ imJid, agentId, userId: user.id }, 'IM group bound to agent');
@@ -582,16 +598,24 @@ router.delete(
     }
 
     // Update DB + in-memory cache
-    const updated = { ...imGroup, target_agent_id: undefined };
+    const updated = clearImBindingTargets(imGroup);
     setRegisteredGroup(imJid, updated);
     const deps = getWebDeps();
     if (deps) {
       const groups = deps.getRegisteredGroups();
-      if (groups[imJid]) groups[imJid] = updated;
+      groups[imJid] = updated;
     }
 
-    // Clear persisted IM routing so restart won't route to unbound channel (#225)
-    updateAgentLastImJid(agentId, null);
+    // Clear persisted IM routing only when this IM chat is the active fallback.
+    if (
+      shouldClearPersistedAgentRoute({
+        oldAgentId: agentId,
+        affectedImJid: imJid,
+        persistedImJid: getAgent(agentId)?.last_im_jid,
+      })
+    ) {
+      updateAgentLastImJid(agentId, null);
+    }
 
     logger.info(
       { imJid, agentId, userId: user.id },
@@ -659,6 +683,7 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
       : undefined;
 
   // Update DB + in-memory cache — clear target_agent_id to avoid conflicts
+  const oldAgentId = imGroup.target_agent_id;
   const updated: RegisteredGroup = {
     ...imGroup,
     target_main_jid: targetMainJid,
@@ -670,7 +695,17 @@ router.put('/:jid/im-binding', authMiddleware, async (c) => {
   const deps = getWebDeps();
   if (deps) {
     const groups = deps.getRegisteredGroups();
-    if (groups[imJid]) groups[imJid] = updated;
+    groups[imJid] = updated;
+  }
+  if (
+    oldAgentId &&
+    shouldClearPersistedAgentRoute({
+      oldAgentId,
+      affectedImJid: imJid,
+      persistedImJid: oldAgentId ? getAgent(oldAgentId)?.last_im_jid : null,
+    })
+  ) {
+    updateAgentLastImJid(oldAgentId, null);
   }
 
   logger.info(
@@ -710,13 +745,13 @@ router.delete('/:jid/im-binding/:imJid', authMiddleware, async (c) => {
     return c.json({ error: 'IM group is not bound to this workspace' }, 400);
   }
 
-  // Update DB + in-memory cache — reset activation_mode to 'auto' on unbind
-  const updated = { ...imGroup, target_main_jid: undefined, activation_mode: 'auto' as const };
+  // Update DB + in-memory cache — preserve activation_mode on the IM group itself
+  const updated = clearImBindingTargets(imGroup);
   setRegisteredGroup(imJid, updated);
   const deps = getWebDeps();
   if (deps) {
     const groups = deps.getRegisteredGroups();
-    if (groups[imJid]) groups[imJid] = updated;
+    groups[imJid] = updated;
   }
 
   logger.info(

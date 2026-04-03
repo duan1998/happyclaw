@@ -10,11 +10,16 @@ import type { Variables } from '../web-context.js';
 import { canAccessGroup, getWebDeps } from '../web-context.js';
 import { getChannelType } from '../im-channel.js';
 import {
+  clearImBindingTargets,
+  shouldClearPersistedAgentRoute,
+} from '../im-binding-utils.js';
+import {
   deleteRegisteredGroup,
   deleteChatHistory,
   getRegisteredGroup,
   setRegisteredGroup,
   getAgent,
+  updateAgentLastImJid,
 } from '../db.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 import {
@@ -865,7 +870,7 @@ function applyBindingUpdate(imJid: string, updated: RegisteredGroup): void {
   const webDeps = getWebDeps();
   if (webDeps) {
     const groups = webDeps.getRegisteredGroups();
-    if (groups[imJid]) groups[imJid] = updated;
+    groups[imJid] = updated;
     webDeps.clearImFailCounts?.(imJid);
   }
 }
@@ -1512,7 +1517,7 @@ configRoutes.post(
 
     try {
       const { generatePairingCode } = await import('../telegram-pairing.js');
-      const result = generatePairingCode(user.id);
+      const result = generatePairingCode(user.id, 'telegram');
       return c.json(result);
     } catch (err) {
       const message =
@@ -1771,7 +1776,7 @@ configRoutes.post('/user-im/qq/pairing-code', authMiddleware, async (c) => {
 
   try {
     const { generatePairingCode } = await import('../telegram-pairing.js');
-    const result = generatePairingCode(user.id);
+    const result = generatePairingCode(user.id, 'qq');
     return c.json(result);
   } catch (err) {
     const message =
@@ -2286,12 +2291,19 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
 
   // Unbind mode
   if (body.unbind === true) {
-    const updated: RegisteredGroup = {
-      ...imGroup,
-      target_main_jid: undefined,
-      target_agent_id: undefined,
-    };
+    const oldAgentId = imGroup.target_agent_id;
+    const updated = clearImBindingTargets(imGroup);
     applyBindingUpdate(imJid, updated);
+    if (
+      oldAgentId &&
+      shouldClearPersistedAgentRoute({
+        oldAgentId,
+        affectedImJid: imJid,
+        persistedImJid: oldAgentId ? getAgent(oldAgentId)?.last_im_jid : null,
+      })
+    ) {
+      updateAgentLastImJid(oldAgentId, null);
+    }
     logger.info({ imJid, userId: user.id }, 'IM group unbound (bindings page)');
     return c.json({ success: true });
   }
@@ -2328,6 +2340,7 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       return c.json({ error: 'IM group is already bound elsewhere' }, 409);
     }
 
+    const oldAgentId = imGroup.target_agent_id;
     const updated: RegisteredGroup = {
       ...imGroup,
       target_agent_id: agentId,
@@ -2335,6 +2348,17 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       reply_policy: replyPolicy,
     };
     applyBindingUpdate(imJid, updated);
+    if (
+      oldAgentId &&
+      shouldClearPersistedAgentRoute({
+        oldAgentId,
+        nextAgentId: agentId,
+        affectedImJid: imJid,
+        persistedImJid: oldAgentId ? getAgent(oldAgentId)?.last_im_jid : null,
+      })
+    ) {
+      updateAgentLastImJid(oldAgentId, null);
+    }
     logger.info(
       { imJid, agentId, userId: user.id },
       'IM group bound to agent (bindings page)',
@@ -2372,6 +2396,7 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       return c.json({ error: 'IM group is already bound elsewhere' }, 409);
     }
 
+    const oldAgentId = imGroup.target_agent_id;
     const updated: RegisteredGroup = {
       ...imGroup,
       target_main_jid: targetMainJid,
@@ -2379,6 +2404,16 @@ configRoutes.put('/user-im/bindings/:imJid', authMiddleware, async (c) => {
       reply_policy: replyPolicy,
     };
     applyBindingUpdate(imJid, updated);
+    if (
+      oldAgentId &&
+      shouldClearPersistedAgentRoute({
+        oldAgentId,
+        affectedImJid: imJid,
+        persistedImJid: oldAgentId ? getAgent(oldAgentId)?.last_im_jid : null,
+      })
+    ) {
+      updateAgentLastImJid(oldAgentId, null);
+    }
     logger.info(
       { imJid, targetMainJid, userId: user.id },
       'IM group bound to workspace (bindings page)',

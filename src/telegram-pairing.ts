@@ -1,10 +1,10 @@
 /**
- * Telegram Pairing Code — generate & verify one-time codes for chat binding.
+ * Pairing Code — generate & verify one-time codes for IM chat binding.
  *
  * - 6-character uppercase alphanumeric code (crypto random)
- * - 5-minute expiry, single use, one active code per user
- * - No periodic cleanup needed: generatePairingCode() enforces one code per user,
- *   and verifyPairingCode() lazily cleans expired entries on access.
+ * - 5-minute expiry, single use, one active code per (user, channel) pair
+ * - No periodic cleanup needed: generatePairingCode() enforces one code per
+ *   (user, channel), and verifyPairingCode() lazily cleans expired entries.
  */
 import crypto from 'crypto';
 
@@ -18,8 +18,12 @@ const CODE_LENGTH = 6;
 
 // code → entry
 const codes = new Map<string, PairingEntry>();
-// userId → code  (ensures only one active code per user)
+// compositeKey → code  (ensures only one active code per user+channel)
 const userCodes = new Map<string, string>();
+
+function compositeKey(userId: string, channel?: string): string {
+  return channel ? `${userId}:${channel}` : userId;
+}
 
 function randomCode(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -32,13 +36,18 @@ function randomCode(): string {
   return result;
 }
 
-export function generatePairingCode(userId: string): {
+export function generatePairingCode(
+  userId: string,
+  channel?: string,
+): {
   code: string;
   expiresAt: number;
   ttlSeconds: number;
 } {
-  // Revoke any previous code for this user
-  const prev = userCodes.get(userId);
+  const key = compositeKey(userId, channel);
+
+  // Revoke any previous code for this user+channel
+  const prev = userCodes.get(key);
   if (prev) codes.delete(prev);
 
   let code: string;
@@ -48,26 +57,44 @@ export function generatePairingCode(userId: string): {
 
   const expiresAt = Date.now() + PAIRING_TTL_MS;
   codes.set(code, { userId, expiresAt });
-  userCodes.set(userId, code);
+  userCodes.set(key, code);
 
   return { code, expiresAt, ttlSeconds: PAIRING_TTL_MS / 1000 };
 }
 
-export function verifyPairingCode(code: string): { userId: string } | null {
-  const entry = codes.get(code.toUpperCase());
+/**
+ * Verify a pairing code.
+ * If `expectedUserId` is provided and does not match the code's owner, the
+ * code is NOT consumed — the user can retry with the correct bot.
+ */
+export function verifyPairingCode(
+  code: string,
+  expectedUserId?: string,
+): { userId: string } | null {
+  const normalized = code.toUpperCase();
+  const entry = codes.get(normalized);
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) {
     // Expired — clean up
-    codes.delete(code.toUpperCase());
-    if (userCodes.get(entry.userId) === code.toUpperCase()) {
-      userCodes.delete(entry.userId);
-    }
+    codes.delete(normalized);
+    cleanUserCode(entry.userId, normalized);
+    return null;
+  }
+  // Wrong bot — do NOT consume the code
+  if (expectedUserId && entry.userId !== expectedUserId) {
     return null;
   }
   // Consume (single use)
-  codes.delete(code.toUpperCase());
-  if (userCodes.get(entry.userId) === code.toUpperCase()) {
-    userCodes.delete(entry.userId);
-  }
+  codes.delete(normalized);
+  cleanUserCode(entry.userId, normalized);
   return { userId: entry.userId };
+}
+
+function cleanUserCode(userId: string, normalized: string): void {
+  for (const [key, val] of userCodes.entries()) {
+    if (val === normalized && key.startsWith(userId)) {
+      userCodes.delete(key);
+      break;
+    }
+  }
 }
