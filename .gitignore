@@ -36,6 +36,9 @@ bun.lockb
 .build-sentinel
 .docker-build-sentinel
 *.tsbuildinfo
+.pack-cache/
+desktop/release/
+happyclaw-portable/
 
 # Local tooling metadata
 .claude/
