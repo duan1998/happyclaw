@@ -7,6 +7,7 @@ import { killProcessTree } from './container-runner.js';
 import { getTaskById } from './db.js';
 import { getSystemSettings } from './runtime-config.js';
 import { logger } from './logger.js';
+import { writeDebugLog } from './debug-log.js';
 export type SendMessageResult = 'sent' | 'no_active';
 
 interface QueuedTask {
@@ -457,6 +458,7 @@ export class GroupQueue {
     text: string,
     images?: Array<{ data: string; mimeType?: string }>,
     onInjected?: () => void,
+    agentModel?: string,
   ): SendMessageResult {
     const state = this.resolveActiveState(groupJid);
     if (!state) return 'no_active';
@@ -492,10 +494,10 @@ export class GroupQueue {
       const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
       const filepath = path.join(inputDir, filename);
       const tempPath = `${filepath}.tmp`;
-      fs.writeFileSync(
-        tempPath,
-        JSON.stringify({ type: 'message', text, images }),
-      );
+      const ipcPayload: Record<string, unknown> = { type: 'message', text, images };
+      if (agentModel) ipcPayload.agentModel = agentModel;
+      writeDebugLog('IPC', `sendMessage agentModel=${agentModel || '(none)'} file=${filename}`);
+      fs.writeFileSync(tempPath, JSON.stringify(ipcPayload));
       fs.renameSync(tempPath, filepath);
       state.queryInFlight = true;
       onInjected?.();

@@ -37,6 +37,19 @@ import { StreamEventProcessor } from './stream-processor.js';
 import { PREDEFINED_AGENTS } from './agent-definitions.js';
 import { createMcpTools } from './mcp-tools.js';
 
+// Debug log — must be declared before any log() call
+const DEBUG_LOG_FILE = process.env.HAPPYCLAW_DEBUG_LOG || '';
+
+function log(message: string): void {
+  console.error(`[agent-runner] ${message}`);
+  if (DEBUG_LOG_FILE) {
+    const ts = new Date().toLocaleString('sv-SE', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }).replace('T', ' ');
+    try {
+      fs.appendFileSync(DEBUG_LOG_FILE, `[${ts}] [AGENT] ${message}\n`);
+    } catch { /* non-fatal */ }
+  }
+}
+
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
 const WORKSPACE_GLOBAL = process.env.HAPPYCLAW_WORKSPACE_GLOBAL || '/workspace/global';
@@ -46,7 +59,8 @@ const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
 // 模型配置：支持别名（opus/sonnet/haiku）或完整模型 ID
 // 别名自动解析为最新版本，如 opus → Opus 4.6
 // [1m] 后缀启用 1M 上下文窗口（CLI 内部 jG() 识别后缀，sM() 返回 1M 窗口）
-const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL || 'opus[1m]';
+let CLAUDE_MODEL = process.env.ANTHROPIC_MODEL || 'opus[1m]';
+log(`[MODEL-DEBUG] Initial CLAUDE_MODEL=${CLAUDE_MODEL} (env ANTHROPIC_MODEL=${process.env.ANTHROPIC_MODEL || '(unset)'})`);
 
 const IPC_INPUT_DIR = path.join(WORKSPACE_IPC, 'input');
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
@@ -330,10 +344,6 @@ function writeOutput(output: ContainerOutput): void {
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
-}
-
-function log(message: string): void {
-  console.error(`[agent-runner] ${message}`);
 }
 
 function generateTurnId(): string {
@@ -702,6 +712,7 @@ function shouldDrain(): boolean {
  */
 interface IpcDrainResult {
   messages: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }> }>;
+  agentModel?: string;
 }
 
 function drainIpcInput(): IpcDrainResult {
@@ -721,6 +732,10 @@ function drainIpcInput(): IpcDrainResult {
             text: data.text,
             images: data.images,
           });
+          if (data.agentModel) {
+            log(`[MODEL-DEBUG] IPC file contains agentModel=${data.agentModel}`);
+            result.agentModel = data.agentModel;
+          }
         }
       } catch (err) {
         log(`Failed to process input file ${file}: ${err instanceof Error ? err.message : String(err)}`);
@@ -791,7 +806,7 @@ function createIpcWatcher(onFileDetected: () => void): { close: () => void } {
  * Wait for a new IPC message or _close sentinel.
  * Returns the messages (with optional images), or null if _close.
  */
-function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: string; mimeType?: string }> } | null> {
+function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: string; mimeType?: string }>; agentModel?: string } | null> {
   return new Promise((resolve) => {
     let resolved = false;
     const tryDrain = () => {
@@ -817,14 +832,14 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
         clearInterruptRequested();
       }
 
-      const { messages } = drainIpcInput();
+      const { messages, agentModel } = drainIpcInput();
 
       if (messages.length > 0) {
         const combinedText = messages.map((m) => m.text).join('\n');
         const allImages = messages.flatMap((m) => m.images || []);
         resolved = true;
         ipcWatcher?.close();
-        resolve({ text: combinedText, images: allImages.length > 0 ? allImages : undefined });
+        resolve({ text: combinedText, images: allImages.length > 0 ? allImages : undefined, agentModel });
         return;
       }
     };
@@ -1076,7 +1091,11 @@ async function runQuery(
       return; // No setTimeout needed — watcher will trigger next check on file change
     }
 
-    const { messages } = drainIpcInput();
+    const { messages, agentModel } = drainIpcInput();
+    if (agentModel && agentModel !== CLAUDE_MODEL) {
+      log(`Model switched (during query): ${CLAUDE_MODEL} -> ${agentModel}`);
+      CLAUDE_MODEL = agentModel;
+    }
     for (const msg of messages) {
       log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
       const rejected = stream.push(msg.text, msg.images);
@@ -1727,7 +1746,7 @@ async function main(): Promise<void> {
       try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
       clearInterruptRequested();
 
-      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
+      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'}, model: ${CLAUDE_MODEL})...`);
 
       const queryResult = await runQuery(
         prompt,
@@ -1839,6 +1858,10 @@ async function main(): Promise<void> {
         consecutiveCompactions = 0;
         prompt = nextMessage.text;
         promptImages = nextMessage.images;
+        if (nextMessage.agentModel && nextMessage.agentModel !== CLAUDE_MODEL) {
+          log(`Model switched: ${CLAUDE_MODEL} -> ${nextMessage.agentModel}`);
+          CLAUDE_MODEL = nextMessage.agentModel;
+        }
         containerInput.turnId = generateTurnId();
         continue;
       }
@@ -1988,6 +2011,10 @@ async function main(): Promise<void> {
       log(`Got new message (${nextMessage.text.length} chars, ${nextMessage.images?.length || 0} images), starting new query`);
       prompt = nextMessage.text;
       promptImages = nextMessage.images;
+      if (nextMessage.agentModel && nextMessage.agentModel !== CLAUDE_MODEL) {
+        log(`Model switched: ${CLAUDE_MODEL} -> ${nextMessage.agentModel}`);
+        CLAUDE_MODEL = nextMessage.agentModel;
+      }
       containerInput.turnId = generateTurnId();
     }
   } catch (err) {

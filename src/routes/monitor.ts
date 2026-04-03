@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'child_process';
+import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
 import { promisify } from 'util';
@@ -17,6 +18,7 @@ import { getRegisteredGroup, getRouterState, hasContainerModeGroups } from '../d
 import { CONTAINER_IMAGE } from '../config.js';
 import { getSystemSettings } from '../runtime-config.js';
 import { logger } from '../logger.js';
+import { getDebugLogPath } from '../debug-log.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -399,5 +401,40 @@ monitorRoutes.post(
     );
   },
 );
+
+// POST /api/open-debug-log - 打开文件管理器定位到调试日志
+monitorRoutes.post('/open-debug-log', authMiddleware, async (c) => {
+  const logPath = getDebugLogPath();
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    if (!fs.existsSync(logPath)) {
+      fs.writeFileSync(logPath, '');
+    }
+    const platform = process.platform;
+    if (platform === 'win32') {
+      spawn('explorer', ['/select,', logPath], { detached: true, stdio: 'ignore' }).unref();
+    } else if (platform === 'darwin') {
+      spawn('open', ['-R', logPath], { detached: true, stdio: 'ignore' }).unref();
+    } else {
+      spawn('xdg-open', [path.dirname(logPath)], { detached: true, stdio: 'ignore' }).unref();
+    }
+    return c.json({ ok: true, path: logPath });
+  } catch (err) {
+    logger.error({ err }, 'Failed to open debug log');
+    return c.json({ error: 'Failed to open log file', path: logPath }, 500);
+  }
+});
+
+// POST /api/clear-debug-log - 清空调试日志
+monitorRoutes.post('/clear-debug-log', authMiddleware, async (c) => {
+  const logPath = getDebugLogPath();
+  try {
+    fs.writeFileSync(logPath, '');
+    return c.json({ ok: true });
+  } catch (err) {
+    logger.error({ err }, 'Failed to clear debug log');
+    return c.json({ error: 'Failed to clear log file' }, 500);
+  }
+});
 
 export default monitorRoutes;

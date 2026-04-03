@@ -16,6 +16,7 @@ import path from 'path';
 
 import { CONTAINER_IMAGE, DATA_DIR, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
+import { writeDebugLog, getDebugLogPath } from './debug-log.js';
 import {
   loadMountAllowlist,
   validateAdditionalMounts,
@@ -385,6 +386,17 @@ function buildVolumeMounts(
     });
   }
 
+  // Mount debug log file so container agent-runner can append to the same log
+  const debugLogPath = getDebugLogPath();
+  if (!fs.existsSync(debugLogPath)) {
+    fs.writeFileSync(debugLogPath, '', { mode: 0o666 });
+  }
+  mounts.push({
+    hostPath: debugLogPath,
+    containerPath: '/workspace/debug.log',
+    readonly: false,
+  });
+
   // Write .credentials.json for OAuth credentials (session dir is already mounted)
   const mergedConfig = mergeClaudeEnvConfig(globalConfig, containerOverride);
   if (mergedConfig.claudeOAuthCredentials) {
@@ -509,10 +521,15 @@ export async function runContainerAgent(
     const containerArgs = buildContainerArgs(mounts, containerName);
 
     // Per-conversation model override: inject as docker -e before image name
-    if (input.agentModel) {
+    {
       const imageIdx = containerArgs.indexOf(CONTAINER_IMAGE);
       if (imageIdx !== -1) {
-        containerArgs.splice(imageIdx, 0, '-e', `ANTHROPIC_MODEL=${input.agentModel}`);
+        if (input.agentModel) {
+          containerArgs.splice(imageIdx, 0, '-e', `ANTHROPIC_MODEL=${input.agentModel}`);
+        }
+        // Pass debug log path (mounted at /workspace/debug.log)
+        const updatedIdx = containerArgs.indexOf(CONTAINER_IMAGE);
+        containerArgs.splice(updatedIdx, 0, '-e', 'HAPPYCLAW_DEBUG_LOG=/workspace/debug.log');
       }
     }
 
@@ -969,9 +986,9 @@ export async function runHostAgent(
     // 项目级 skills（HappyClaw 内置）
     const projectRoot = process.cwd();
     linkSkillEntries(path.join(projectRoot, 'container', 'skills'));
-    // 工作区 IDE skills（.cursor/skills/ 和 .claude/skills/，后者覆盖前者同名）
+    // 工作区 IDE skills（.codex < .cursor < .claude，后者覆盖前者同名）
     if (groupDir !== defaultGroupDir) {
-      for (const subdir of ['.cursor', '.claude']) {
+      for (const subdir of ['.codex', '.cursor', '.claude']) {
         const wsSkillsDir = path.join(groupDir, subdir, 'skills');
         if (fs.existsSync(wsSkillsDir)) {
           linkSkillEntries(wsSkillsDir);
@@ -1056,6 +1073,8 @@ export async function runHostAgent(
     if (input.agentModel) {
       hostEnv['ANTHROPIC_MODEL'] = input.agentModel;
     }
+    hostEnv['HAPPYCLAW_DEBUG_LOG'] = getDebugLogPath();
+    writeDebugLog('RUNNER', `Host agent env: agentModel=${input.agentModel || '(none)'} ANTHROPIC_MODEL=${hostEnv['ANTHROPIC_MODEL'] || '(none)'}`);
     // 让 SDK 捕获 CLI 的 stderr 输出，便于排查启动失败
     hostEnv['DEBUG_CLAUDE_AGENT_SDK'] = '1';
     // CLI 禁止 root 用户使用 --dangerously-skip-permissions，
@@ -1242,7 +1261,7 @@ export async function runHostAgent(
               : null;
             return {
               result: userFacingError,
-              error: `Host agent exited with ${exitLabel}: ${stderrContent.slice(-200)}`,
+              error: `Host agent exited with ${exitLabel}: ${stderrContent.slice(-800)}`,
             };
           },
         };

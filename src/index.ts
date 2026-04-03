@@ -148,6 +148,7 @@ import {
   SubAgent,
 } from './types.js';
 import { logger } from './logger.js';
+import { writeDebugLog } from './debug-log.js';
 import { resolveTaskOwner } from './task-utils.js';
 import {
   ensureAgentDirectories,
@@ -5912,6 +5913,7 @@ async function startMessageLoop(): Promise<void> {
           const lastSourceJidForRoute =
             messagesToSend[messagesToSend.length - 1]?.source_jid || chatJid;
 
+          writeDebugLog('INDEX', `sendMessage chatJid=${chatJid} defaultModel=${group.default_model || '(none)'}`);
           const sendResult = queue.sendMessage(
             chatJid,
             formatted,
@@ -5920,6 +5922,7 @@ async function startMessageLoop(): Promise<void> {
               // IPC write succeeded — update reply route for the running agent
               activeRouteUpdaters.get(group.folder)?.(lastSourceJidForRoute);
             },
+            group.default_model || undefined,
           );
           if (sendResult === 'sent') {
             logger.debug(
@@ -6478,6 +6481,7 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
             formatted,
             imagesForAgent,
             undefined,
+            agent?.agent_model || undefined,
           )
         : 'no_active';
       if (sendResult === 'no_active') {
@@ -6899,6 +6903,24 @@ async function main(): Promise<void> {
 
   loadState();
 
+  // Kill orphaned agent-runner processes from previous backend instance.
+  // Write _close sentinels to all IPC input dirs so surviving agents shut down.
+  {
+    const ipcRoot = path.join(DATA_DIR, 'ipc');
+    if (fs.existsSync(ipcRoot)) {
+      for (const folder of fs.readdirSync(ipcRoot)) {
+        const inputDir = path.join(ipcRoot, folder, 'input');
+        if (fs.existsSync(inputDir)) {
+          const sentinel = path.join(inputDir, '_close');
+          try {
+            fs.writeFileSync(sentinel, '');
+            writeDebugLog('SERVICE', `Wrote _close sentinel to orphan IPC: ${folder}`);
+          } catch { /* ignore */ }
+        }
+      }
+    }
+  }
+
   // --- Channel reload helpers (hot-reload on config save) ---
 
   let feishuSyncInterval: ReturnType<typeof setInterval> | null = null;
@@ -6912,6 +6934,7 @@ async function main(): Promise<void> {
     }
     shutdownInProgress = true;
     shuttingDown = true;
+    writeDebugLog('SERVICE', `Backend stopping (signal=${signal})`);
     logger.info({ signal }, 'Shutdown signal received, cleaning up...');
 
     // Force exit after 30s if graceful shutdown hangs.
@@ -7321,6 +7344,8 @@ async function main(): Promise<void> {
     },
     handleSpawnCommand,
   });
+
+  writeDebugLog('SERVICE', `Backend started (port=${process.env.WEB_PORT || 3000})`);
 
   // Clean expired sessions every hour
   setInterval(

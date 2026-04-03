@@ -1,15 +1,15 @@
 import { useState, useMemo, useEffect } from 'react';
 import { NavLink, useNavigate, useLocation } from 'react-router-dom';
-import { Plus, PanelLeftClose, Bug, LogOut, UserCog } from 'lucide-react';
+import { Plus, PanelLeftClose, FileText, Trash2, LogOut, UserCog } from 'lucide-react';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { useBillingStore } from '../../stores/billing';
 import { useGroupsStore } from '../../stores/groups';
 import { useClearWorkspace } from '../../hooks/useClearWorkspace';
+import { api } from '../../api/client';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/common';
 import { EmojiAvatar } from '../common/EmojiAvatar';
-import { BugReportDialog } from '../common/BugReportDialog';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ChatGroupItem } from '../chat/ChatGroupItem';
@@ -34,7 +34,6 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
   const user = useAuthStore((s) => s.user);
   const appearance = useAuthStore((s) => s.appearance);
   const billingEnabled = useBillingStore((s) => s.billingEnabled);
-  const [showBugReport, setShowBugReport] = useState(false);
   const userInitial = (user?.display_name || user?.username || '?')[0].toUpperCase();
 
   const navItems = useMemo(
@@ -170,14 +169,22 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
         {/* Spacer */}
         <div className="flex-1" />
 
-        {/* Bug report */}
+        {/* Debug log buttons */}
         <Tooltip>
           <TooltipTrigger asChild>
-            <button onClick={() => setShowBugReport(true)} className="w-10 h-10 rounded-lg flex items-center justify-center text-muted-foreground hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/30 transition-colors">
-              <Bug className="w-4 h-4" />
+            <button onClick={() => api.post('/api/open-debug-log').catch(() => {})} className="w-10 h-10 rounded-lg flex items-center justify-center text-muted-foreground hover:text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/30 transition-colors">
+              <FileText className="w-4 h-4" />
             </button>
           </TooltipTrigger>
-          <TooltipContent side="right">报告问题</TooltipContent>
+          <TooltipContent side="right">打开调试日志</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button onClick={() => api.post('/api/clear-debug-log').catch(() => {})} className="w-10 h-10 rounded-lg flex items-center justify-center text-muted-foreground hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors">
+              <Trash2 className="w-4 h-4" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="right">清空调试日志</TooltipContent>
         </Tooltip>
 
         {/* User avatar popover */}
@@ -302,7 +309,6 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
       </div>
     </div>
 
-        <BugReportDialog open={showBugReport} onClose={() => setShowBugReport(false)} />
         <CreateContainerDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={handleCreated} />
         <RenameDialog open={renameState.open} jid={renameState.jid} currentName={renameState.name} onClose={() => setRenameState({ open: false, jid: '', name: '' })} />
         <ConfirmDialog open={clearState.open} onClose={closeClear} onConfirm={handleClearConfirm} title="重建工作区" message={`确认重建「${clearState.name}」？不可撤销。`} confirmText="确认重建" confirmVariant="danger" loading={clearLoading} />

@@ -8,6 +8,7 @@ import type { Readable } from 'stream';
 
 import { getSystemSettings } from './runtime-config.js';
 import { logger } from './logger.js';
+import { writeDebugLog } from './debug-log.js';
 import type { ContainerOutput } from './container-runner.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -449,8 +450,10 @@ export function handleNonZeroExit(
     ? ctx.enrichError(stderr, exitLabel)
     : {
         result: null as string | null,
-        error: `${ctx.label} exited with ${exitLabel}: ${stderr.slice(-200)}`,
+        error: `${ctx.label} exited with ${exitLabel}: ${stderr.slice(-800)}`,
       };
+
+  writeDebugLog('CRASH', `${ctx.label} group=${ctx.groupName} code=${code} signal=${signal} duration=${duration}ms\n  stderr: ${stderr.slice(-1500)}`);
 
   logger.error(
     {
