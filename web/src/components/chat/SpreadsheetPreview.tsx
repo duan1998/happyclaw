@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Download, Loader2, Table, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, Download, Loader2, Search, Table, X } from 'lucide-react';
 import { read, utils } from 'xlsx';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { api } from '../../api/client';
 import type { FileEntry } from '../../stores/files';
 import { downloadFromUrl } from '../../utils/download';
@@ -30,6 +31,11 @@ interface SpreadsheetPreviewProps {
   onClose: () => void;
 }
 
+interface SpreadsheetMatch {
+  rowIndex: number;
+  colIndex: number;
+}
+
 function normalizeRows(input: unknown[][]): SpreadsheetSheet['rows'] {
   return input.map((row) =>
     row.map((cell) => {
@@ -51,6 +57,13 @@ function toSheetPreview(name: string, inputRows: unknown[][]): SpreadsheetSheet 
   };
 }
 
+function getDisplayCellValue(sheet: SpreadsheetSheet, rowIndex: number, colIndex: number): string {
+  if (rowIndex === 0) {
+    return sheet.rows[0]?.[colIndex] || `列 ${colIndex + 1}`;
+  }
+  return sheet.rows[rowIndex]?.[colIndex] || '';
+}
+
 export function SpreadsheetPreview({
   groupJid,
   file,
@@ -60,18 +73,31 @@ export function SpreadsheetPreview({
   const [error, setError] = useState<string | null>(null);
   const [sheets, setSheets] = useState<SpreadsheetSheet[]>([]);
   const [activeSheetName, setActiveSheetName] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const cellRefs = useRef(new Map<string, HTMLTableCellElement>());
 
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
     };
+    const handleFind = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
 
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     window.addEventListener('keydown', handleEsc);
+    window.addEventListener('keydown', handleFind);
     return () => {
       document.body.style.overflow = prevOverflow;
       window.removeEventListener('keydown', handleEsc);
+      window.removeEventListener('keydown', handleFind);
     };
   }, [onClose]);
 
@@ -136,6 +162,68 @@ export function SpreadsheetPreview({
     () => sheets.find((sheet) => sheet.name === activeSheetName) ?? sheets[0] ?? null,
     [activeSheetName, sheets],
   );
+
+  const trimmedQuery = searchQuery.trim().toLowerCase();
+
+  const matches = useMemo<SpreadsheetMatch[]>(() => {
+    if (!activeSheet || !trimmedQuery) return [];
+    const nextMatches: SpreadsheetMatch[] = [];
+    for (let rowIndex = 0; rowIndex < activeSheet.rows.length; rowIndex += 1) {
+      for (let colIndex = 0; colIndex < activeSheet.maxCols; colIndex += 1) {
+        const value = getDisplayCellValue(activeSheet, rowIndex, colIndex).toLowerCase();
+        if (value.includes(trimmedQuery)) {
+          nextMatches.push({ rowIndex, colIndex });
+        }
+      }
+    }
+    return nextMatches;
+  }, [activeSheet, trimmedQuery]);
+
+  useEffect(() => {
+    setActiveMatchIndex(0);
+  }, [trimmedQuery, activeSheetName]);
+
+  useEffect(() => {
+    if (matches.length === 0) return;
+    if (activeMatchIndex < matches.length) return;
+    setActiveMatchIndex(matches.length - 1);
+  }, [activeMatchIndex, matches]);
+
+  useEffect(() => {
+    if (matches.length === 0) return;
+    const match = matches[activeMatchIndex];
+    const key = `${match.rowIndex}:${match.colIndex}`;
+    const element = cellRefs.current.get(key);
+    element?.scrollIntoView({ block: 'nearest', inline: 'center' });
+  }, [activeMatchIndex, matches]);
+
+  const registerCellRef = useCallback((rowIndex: number, colIndex: number, node: HTMLTableCellElement | null) => {
+    const key = `${rowIndex}:${colIndex}`;
+    if (node) {
+      cellRefs.current.set(key, node);
+    } else {
+      cellRefs.current.delete(key);
+    }
+  }, []);
+
+  const jumpToMatch = useCallback((direction: 1 | -1) => {
+    if (matches.length === 0) return;
+    setActiveMatchIndex((prev) => {
+      const next = prev + direction;
+      if (next < 0) return matches.length - 1;
+      if (next >= matches.length) return 0;
+      return next;
+    });
+  }, [matches]);
+
+  const isMatchCell = useCallback((rowIndex: number, colIndex: number) => {
+    return matches.some((match) => match.rowIndex === rowIndex && match.colIndex === colIndex);
+  }, [matches]);
+
+  const isActiveMatchCell = useCallback((rowIndex: number, colIndex: number) => {
+    const match = matches[activeMatchIndex];
+    return !!match && match.rowIndex === rowIndex && match.colIndex === colIndex;
+  }, [activeMatchIndex, matches]);
 
   const handleDownload = () => {
     downloadFromUrl(buildFileDownloadUrl(groupJid, file.path), file.name).catch((err) => {
@@ -202,6 +290,55 @@ export function SpreadsheetPreview({
             </div>
           ) : (
             <div className="h-full flex flex-col">
+              <div className="px-4 py-2 border-b border-border bg-background/95">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <div className="relative flex-1 min-w-0">
+                    <Search className="absolute left-3 top-1/2 w-4 h-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      ref={searchInputRef}
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          jumpToMatch(e.shiftKey ? -1 : 1);
+                        }
+                      }}
+                      placeholder="搜索当前表格内容"
+                      className="pl-9"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-2 sm:justify-end">
+                    <span className="text-xs text-muted-foreground whitespace-nowrap">
+                      {trimmedQuery
+                        ? (matches.length > 0 ? `${activeMatchIndex + 1} / ${matches.length}` : '无结果')
+                        : '输入关键词开始查找'}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon-sm"
+                        onClick={() => jumpToMatch(-1)}
+                        disabled={matches.length === 0}
+                        aria-label="上一个匹配"
+                      >
+                        <ChevronUp className="w-4 h-4" />
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon-sm"
+                        onClick={() => jumpToMatch(1)}
+                        disabled={matches.length === 0}
+                        aria-label="下一个匹配"
+                      >
+                        <ChevronDown className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
               <div className="px-4 py-2 border-b border-border bg-muted/40 text-xs text-muted-foreground flex items-center gap-2">
                 <Table className="w-3.5 h-3.5" />
                 共 {activeSheet.totalRows} 行，预览前 {activeSheet.rows.length} 行
@@ -217,9 +354,16 @@ export function SpreadsheetPreview({
                       {Array.from({ length: activeSheet.maxCols }, (_, index) => (
                         <th
                           key={index}
-                          className="min-w-32 px-3 py-2 text-left font-medium border-b border-border bg-muted/60"
+                          ref={(node) => registerCellRef(0, index, node)}
+                          className={`min-w-32 px-3 py-2 text-left font-medium border-b border-border bg-muted/60 transition-colors ${
+                            isActiveMatchCell(0, index)
+                              ? 'bg-amber-300/80 dark:bg-amber-500/40'
+                              : isMatchCell(0, index)
+                                ? 'bg-amber-200/70 dark:bg-amber-500/20'
+                                : ''
+                          }`}
                         >
-                          {activeSheet.rows[0]?.[index] || `列 ${index + 1}`}
+                          {getDisplayCellValue(activeSheet, 0, index)}
                         </th>
                       ))}
                     </tr>
@@ -233,7 +377,14 @@ export function SpreadsheetPreview({
                         {Array.from({ length: activeSheet.maxCols }, (_, colIndex) => (
                           <td
                             key={colIndex}
-                            className="px-3 py-2 align-top border-b border-border whitespace-pre-wrap break-words"
+                            ref={(node) => registerCellRef(rowIndex + 1, colIndex, node)}
+                            className={`px-3 py-2 align-top border-b border-border whitespace-pre-wrap break-words transition-colors ${
+                              isActiveMatchCell(rowIndex + 1, colIndex)
+                                ? 'bg-amber-300/80 dark:bg-amber-500/40'
+                                : isMatchCell(rowIndex + 1, colIndex)
+                                  ? 'bg-amber-200/70 dark:bg-amber-500/20'
+                                  : ''
+                            }`}
                           >
                             {row[colIndex] || ''}
                           </td>

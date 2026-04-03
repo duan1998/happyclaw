@@ -40,6 +40,9 @@ const POLL_INTERVAL_MS = 2000;
 const TERMINAL_MIN_HEIGHT = 150;
 const TERMINAL_DEFAULT_HEIGHT = 300;
 const TERMINAL_MAX_RATIO = 0.7;
+const SIDEBAR_MIN_WIDTH = 280;
+const SIDEBAR_DEFAULT_WIDTH = 320;
+const SIDEBAR_MAX_RATIO = 0.6;
 
 // Stable empty references to avoid infinite re-render loops in Zustand selectors
 const EMPTY_AGENTS: import('../../types').AgentInfo[] = [];
@@ -59,6 +62,13 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const [mobilePanel, setMobilePanel] = useState<SidebarTab | null>(null);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('files');
   const [panelOpen, setPanelOpen] = useState(false);
+  const [sidebarDragging, setSidebarDragging] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    if (typeof window === 'undefined') return SIDEBAR_DEFAULT_WIDTH;
+    const raw = window.localStorage.getItem('chat-sidebar-width');
+    const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+    return Number.isFinite(parsed) ? Math.max(SIDEBAR_MIN_WIDTH, parsed) : SIDEBAR_DEFAULT_WIDTH;
+  });
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
   const [resetAgentId, setResetAgentId] = useState<string | null>(null);
@@ -83,6 +93,10 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const isDraggingRef = useRef(false);
   const dragStartYRef = useRef(0);
   const dragStartHeightRef = useRef(0);
+  const isSidebarDraggingRef = useRef(false);
+  const sidebarDragStartXRef = useRef(0);
+  const sidebarDragStartWidthRef = useRef(0);
+  const sidebarWidthRef = useRef(sidebarWidth);
 
   // Individual selectors: avoid re-renders from unrelated store changes (e.g. streaming)
   const group = useChatStore(s => s.groups[groupJid]);
@@ -140,6 +154,10 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
       setSidebarTab('files');
     }
   }, [sidebarTab, showMembersTab, canManageWorkspaceConfig]);
+
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth;
+  }, [sidebarWidth]);
 
   // Fetch IM connection status for home groups
   const isOwnHome =
@@ -355,6 +373,62 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   const handleTouchDragStart = useCallback((e: React.TouchEvent) => {
     startDrag(e.touches[0].clientY);
   }, [startDrag]);
+
+  const startSidebarDrag = useCallback((startX: number) => {
+    isSidebarDraggingRef.current = true;
+    setSidebarDragging(true);
+    sidebarDragStartXRef.current = startX;
+    sidebarDragStartWidthRef.current = sidebarWidth;
+
+    const calcWidth = (currentX: number) => {
+      const delta = sidebarDragStartXRef.current - currentX;
+      const maxWidth = containerRef.current
+        ? Math.max(SIDEBAR_MIN_WIDTH, Math.floor(containerRef.current.clientWidth * SIDEBAR_MAX_RATIO))
+        : 720;
+      return Math.min(
+        maxWidth,
+        Math.max(SIDEBAR_MIN_WIDTH, sidebarDragStartWidthRef.current + delta),
+      );
+    };
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isSidebarDraggingRef.current) return;
+      setSidebarWidth(calcWidth(e.clientX));
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (!isSidebarDraggingRef.current) return;
+      setSidebarWidth(calcWidth(e.touches[0].clientX));
+    };
+
+    const cleanup = () => {
+      isSidebarDraggingRef.current = false;
+      setSidebarDragging(false);
+      window.localStorage.setItem('chat-sidebar-width', String(sidebarWidthRef.current));
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', cleanup);
+      document.removeEventListener('touchmove', handleTouchMove);
+      document.removeEventListener('touchend', cleanup);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', cleanup);
+    document.addEventListener('touchmove', handleTouchMove, { passive: true });
+    document.addEventListener('touchend', cleanup);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [sidebarWidth]);
+
+  const handleSidebarDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    startSidebarDrag(e.clientX);
+  }, [startSidebarDrag]);
+
+  const handleSidebarTouchDragStart = useCallback((e: React.TouchEvent) => {
+    startSidebarDrag(e.touches[0].clientX);
+  }, [startSidebarDrag]);
 
   // Toggle terminal: desktop = bottom panel, mobile = modal
   const handleTerminalToggle = useCallback(() => {
@@ -609,10 +683,39 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         </div>
 
         {/* Desktop: sidebar with icon tabs (collapsible) */}
-        <div className={cn(
-          "hidden lg:flex lg:flex-col flex-shrink-0 border-l border-border bg-surface dark:bg-background transition-[width] duration-200",
-          panelOpen ? "w-80" : "w-0 overflow-hidden border-l-0"
-        )}>
+        <div
+          className={cn(
+            "hidden lg:flex lg:flex-col relative flex-shrink-0 bg-surface dark:bg-background",
+            sidebarDragging ? "transition-none" : "transition-[width] duration-200",
+            panelOpen ? "border-l border-border" : "overflow-hidden border-l-0",
+          )}
+          style={{ width: panelOpen ? sidebarWidth : 0 }}
+        >
+          {panelOpen && (
+            <div
+              onMouseDown={handleSidebarDragStart}
+              onTouchStart={handleSidebarTouchDragStart}
+              className="absolute left-0 top-0 bottom-0 z-20 w-4 -translate-x-1/2 cursor-col-resize group touch-none flex items-center justify-center"
+              aria-hidden="true"
+            >
+              <div
+                className={cn(
+                  "h-full w-px rounded-full transition-all",
+                  sidebarDragging
+                    ? "bg-primary shadow-[0_0_0_1px_rgba(0,0,0,0.04)]"
+                    : "bg-border group-hover:bg-primary/70 group-hover:shadow-[0_0_0_1px_rgba(0,0,0,0.03)]",
+                )}
+              />
+              <div
+                className={cn(
+                  "absolute inset-y-0 left-1/2 -translate-x-1/2 w-2 rounded-full transition-colors",
+                  sidebarDragging
+                    ? "bg-primary/12"
+                    : "bg-transparent group-hover:bg-primary/8",
+                )}
+              />
+            </div>
+          )}
           {/* Icon tab bar */}
           <TooltipProvider delayDuration={300}>
             <div className="flex border-b border-border">
