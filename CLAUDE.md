@@ -208,7 +208,7 @@ StreamEvent 类型以 `shared/stream-event.ts` 为单一真相源，构建时通
 | Claude 会话 `data/sessions/{folder}/.claude/` | `/home/node/.claude` | 读写 | 读写（仅自己） |
 | IPC 通道 `data/ipc/{folder}/` | `/workspace/ipc` | 读写 | 读写（仅自己） |
 | 项目级 Skills `container/skills/` | `/workspace/project-skills` | 只读 | 只读 |
-| 用户级 Skills `~/.claude/skills/` | `/workspace/user-skills` | 只读 | admin 创建的会话可读 |
+| 用户级 Skills `~/.codex/skills/`、`~/.cursor/skills/`、`~/.claude/skills/` | `/workspace/user-skills` | 只读 | admin 创建的会话可读 |
 | 环境变量 `data/env/{folder}/env` | `/workspace/env-dir/env` | 只读 | 只读 |
 | 额外挂载（白名单内） | `/workspace/extra/{name}` | 按白名单 | 按白名单（`nonMainReadOnly` 时强制只读） |
 
@@ -753,7 +753,7 @@ make help          # 列出所有可用的 make 命令
 ### 新增 Skills
 
 1. 项目级：添加到 `container/skills/`（自动挂载到所有容器，通过符号链接发现）
-2. 用户级：添加到 `~/.claude/skills/`（自动挂载到所有容器）
+2. 用户级：添加到 `~/.claude/skills/`、`~/.cursor/skills/` 或 `~/.codex/skills/`（自动同步到 per-user 目录并挂载到所有容器，`.claude` 优先级最高）
 3. 无需重建镜像，volume 挂载 + entrypoint.sh 符号链接自动发现
 
 ### 新增 StreamEvent 类型

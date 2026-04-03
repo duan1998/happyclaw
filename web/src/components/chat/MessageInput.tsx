@@ -695,7 +695,7 @@ export function MessageInput({
                     modelInfo.agentRuntime === 'codex' ? 'bg-emerald-500' : 'bg-violet-500'
                   }`} />
                   <span className="max-w-[120px] truncate">
-                    {modelInfo.agentModel || '默认'}
+                    {modelInfo.agentModel || availableModels[0] || '默认'}
                   </span>
                   <ChevronDown className="w-3 h-3 flex-shrink-0" />
                 </button>
@@ -708,7 +708,7 @@ export function MessageInput({
                           key={m}
                           onClick={() => { onModelChange(m); setShowModelMenu(false); }}
                           className={`w-full px-3 py-1.5 text-left text-sm transition-colors cursor-pointer ${
-                            modelInfo.agentModel === m
+                            (modelInfo.agentModel || availableModels[0]) === m
                               ? 'bg-accent text-accent-foreground font-medium'
                               : 'text-foreground/80 hover:bg-muted'
                           }`}

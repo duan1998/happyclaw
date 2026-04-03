@@ -36,7 +36,7 @@ export function NewConversationDialog({ open, defaultRuntime, onConfirm, onClose
   const handleConfirm = () => {
     const trimmed = name.trim();
     if (!trimmed) return;
-    onConfirm(trimmed, runtime, model || undefined);
+    onConfirm(trimmed, runtime, model || availableModels[0] || undefined);
     onClose();
   };
 
@@ -91,15 +91,17 @@ export function NewConversationDialog({ open, defaultRuntime, onConfirm, onClose
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1.5">模型 <span className="text-muted-foreground font-normal">(留空使用全局默认)</span></label>
+            <label className="block text-sm font-medium mb-1.5">模型</label>
             <div className="flex flex-wrap gap-1.5">
-              {availableModels.map((preset) => (
+              {availableModels.map((preset) => {
+                const isSelected = (model || availableModels[0]) === preset;
+                return (
                 <button
                   key={preset}
                   type="button"
-                  onClick={() => setModel(model === preset ? '' : preset)}
+                  onClick={() => setModel(preset)}
                   className={`px-2.5 py-1 rounded-md border text-xs font-medium transition-all cursor-pointer ${
-                    model === preset
+                    isSelected
                       ? runtime === 'codex'
                         ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300'
                         : 'border-violet-500 bg-violet-50 dark:bg-violet-950/30 text-violet-700 dark:text-violet-300'
@@ -108,7 +110,8 @@ export function NewConversationDialog({ open, defaultRuntime, onConfirm, onClose
                 >
                   {preset}
                 </button>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>

@@ -21,9 +21,9 @@ function resolveDataDir(): string {
   if (process.env.HAPPYCLAW_DATA_DIR) {
     return path.resolve(process.env.HAPPYCLAW_DATA_DIR);
   }
-  // Windows: use %APPDATA%\HappyClaw\data (survives reinstalls, shared between dev & desktop)
+  // Windows: use %APPDATA%\happyclaw-desktop\data (matches Electron userData path)
   if (process.platform === 'win32' && process.env.APPDATA) {
-    return path.join(process.env.APPDATA, 'HappyClaw', 'data');
+    return path.join(process.env.APPDATA, 'happyclaw-desktop', 'data');
   }
   return path.resolve(PROJECT_ROOT, 'data');
 }

@@ -1,0 +1,26 @@
+---
+description: Git 工作流和发布约定
+alwaysApply: true
+---
+
+# Git 工作流
+
+## Remote 约定
+
+- `origin` = 上游仓库 (riba2534/happyclaw)，当前账号无写权限
+- `fork` = 个人 fork (duan1998/happyclaw)，推送用 `git push fork main`
+
+## 发布脚本
+
+| 脚本 | 用途 |
+|------|------|
+| `rebuild.cmd` | 杀进程 → 编译后端 → 编译前端 → 启动后端（测试环境） |
+| `start.cmd` | 杀进程 → 启动已编译的后端 |
+| `build-desktop.cmd` | 编译 + 打包 Electron 桌面端安装包 |
+
+## 环境区分
+
+- **测试环境**：`rebuild.cmd` / `start.cmd` 启动的 node 进程，网页访问 `http://localhost:3000`
+- **生产环境**：`HappyClaw.exe` 桌面端，自带打包的后端，启动时会强杀端口 3000 上的残留进程
+
+桌面端 (`desktop/main.js`) 启动时如果端口已被占用，会先 `taskkill` 杀掉占用进程再启动自己的后端，不复用外部进程。

@@ -57,6 +57,17 @@ function getWorkspaceSkillsDir(
   return path.join(getWorkspaceClaudeDir(group), 'skills');
 }
 
+const WORKSPACE_SKILLS_SUBDIRS = ['.codex', '.cursor', '.claude'] as const;
+
+function getWorkspaceAllSkillsDirs(
+  group: RegisteredGroup & { jid: string },
+): string[] {
+  const root = getWorkspaceRoot(group);
+  return WORKSPACE_SKILLS_SUBDIRS.map((sub) =>
+    path.join(root, sub, 'skills'),
+  );
+}
+
 function getWorkspaceSettingsPath(
   group: RegisteredGroup & { jid: string },
 ): string {
@@ -211,8 +222,17 @@ workspaceConfigRoutes.get(
     const group = resolveGroup(c);
     if (!group) return c.json({ error: 'Group not found or access denied' }, 404);
 
-    const skillsDir = getWorkspaceSkillsDir(group);
-    const skills = scanSkillDirectory(skillsDir, 'workspace');
+    const seen = new Set<string>();
+    const skills: ReturnType<typeof scanSkillDirectory> = [];
+    // Reverse iteration: .claude (highest priority) first, so first-seen wins
+    for (const dir of [...getWorkspaceAllSkillsDirs(group)].reverse()) {
+      for (const skill of scanSkillDirectory(dir, 'workspace')) {
+        if (!seen.has(skill.id)) {
+          seen.add(skill.id);
+          skills.push(skill);
+        }
+      }
+    }
     return c.json({ skills });
   },
 );

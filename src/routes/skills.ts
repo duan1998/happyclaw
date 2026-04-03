@@ -77,8 +77,12 @@ function getUserSkillsDir(userId: string): string {
   return path.join(DATA_DIR, 'skills', userId);
 }
 
-function getGlobalSkillsDir(): string {
-  return path.join(os.homedir(), '.claude', 'skills');
+const GLOBAL_SKILLS_SUBDIRS = ['.codex', '.cursor', '.claude'] as const;
+
+function getGlobalSkillsDirs(): string[] {
+  return GLOBAL_SKILLS_SUBDIRS.map((sub) =>
+    path.join(os.homedir(), sub, 'skills'),
+  );
 }
 
 function getProjectSkillsDir(): string {
@@ -834,20 +838,22 @@ async function installSkillForUser(
 }
 
 /**
- * Sync host-level skills (~/.claude/skills/) to a user's directory.
+ * Sync host-level skills (~/.claude/skills/, ~/.cursor/skills/, ~/.codex/skills/) to a user's directory.
  * Standalone function usable from both the API route and the auto-sync timer.
+ * Priority: .codex < .cursor < .claude (later dir wins on name collision).
  */
 async function syncHostSkillsForUser(
   userId: string,
 ): Promise<{ stats: { added: number; updated: number; deleted: number; skipped: number }; total: number }> {
   return withSkillInstallLock(async () => {
-    const hostDir = getGlobalSkillsDir();
+    const hostDirs = getGlobalSkillsDirs();
     const userDir = getUserSkillsDir(userId);
     fs.mkdirSync(userDir, { recursive: true });
 
-    // 1. 扫描宿主机 skills
-    const hostSkillNames: string[] = [];
-    if (fs.existsSync(hostDir)) {
+    // 1. 扫描所有宿主机 skills 目录（后扫描的覆盖前面的同名 skill）
+    const hostSkillMap = new Map<string, string>();
+    for (const hostDir of hostDirs) {
+      if (!fs.existsSync(hostDir)) continue;
       for (const entry of fs.readdirSync(hostDir, { withFileTypes: true })) {
         if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
         const skillDir = path.join(hostDir, entry.name);
@@ -857,13 +863,14 @@ async function syncHostSkillsForUser(
             fs.existsSync(path.join(realPath, 'SKILL.md')) ||
             fs.existsSync(path.join(realPath, 'SKILL.md.disabled'))
           ) {
-            hostSkillNames.push(entry.name);
+            hostSkillMap.set(entry.name, hostDir);
           }
         } catch {
           // 跳过 broken symlinks
         }
       }
     }
+    const hostSkillNames = [...hostSkillMap.keys()];
 
     // 2. 读取 manifest
     const manifest = readHostSyncManifest(userId);
@@ -889,7 +896,8 @@ async function syncHostSkillsForUser(
         continue;
       }
 
-      const src = path.join(hostDir, name);
+      const srcDir = hostSkillMap.get(name)!;
+      const src = path.join(srcDir, name);
       const dest = path.join(userDir, name);
 
       if (existingUserSkills.has(name)) {
