@@ -305,7 +305,7 @@ async function runTask(
         runningTaskIds.delete(task.id);
         // Still compute next run so the task isn't stuck (but preserve for manual runs)
         const nextRun = options?.manualRun ? task.next_run : computeNextRun(task);
-        updateTaskAfterRun(task.id, nextRun, `Error: 计费限制: ${reason}`);
+        updateTaskAfterRun(task.id, nextRun, `Error: 计费限制: ${reason}`, true);
         return;
       }
     }
@@ -487,7 +487,7 @@ async function runTask(
     : result
       ? result.slice(0, 200)
       : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+  updateTaskAfterRun(task.id, nextRun, resultSummary, Boolean(error));
 
   // Auto-cleanup once-task workspace after completion
   if (task.schedule_type === 'once' && !options?.manualRun && task.workspace_jid && task.workspace_folder) {
@@ -555,7 +555,7 @@ async function runScriptTask(
           });
           runningTaskIds.delete(task.id);
           const nextRun = manualRun ? task.next_run : computeNextRun(task);
-          updateTaskAfterRun(task.id, nextRun, `Error: 计费限制: ${reason}`);
+          updateTaskAfterRun(task.id, nextRun, `Error: 计费限制: ${reason}`, true);
           return;
         }
       }
@@ -638,7 +638,7 @@ async function runScriptTask(
     : result
       ? result.slice(0, 200)
       : 'Completed';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+  updateTaskAfterRun(task.id, nextRun, resultSummary, Boolean(error));
 }
 
 /**
@@ -651,7 +651,9 @@ async function runGroupModeTask(
   targetGroupJid: string,
   manualRun = false,
 ): Promise<void> {
+  runningTaskIds.add(task.id);
   const startTime = Date.now();
+  let error: string | null = null;
 
   try {
     // Resolve task owner for sender attribution
@@ -687,7 +689,7 @@ async function runGroupModeTask(
       error: null,
     });
   } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
+    error = err instanceof Error ? err.message : String(err);
     logger.error({ taskId: task.id, error }, 'Group-mode task injection failed');
 
     logTaskRun({
@@ -698,12 +700,16 @@ async function runGroupModeTask(
       result: null,
       error,
     });
+  } finally {
+    runningTaskIds.delete(task.id);
   }
 
   // Update next_run (manualRun preserves original schedule)
   const nextRun = manualRun ? task.next_run : computeNextRun(task);
-  const resultSummary = '已注入到源工作区';
-  updateTaskAfterRun(task.id, nextRun, resultSummary);
+  const resultSummary = error
+    ? `Error: ${error}`
+    : '已注入到源工作区';
+  updateTaskAfterRun(task.id, nextRun, resultSummary, Boolean(error));
 }
 
 let schedulerRunning = false;

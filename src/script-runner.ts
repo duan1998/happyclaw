@@ -1,9 +1,12 @@
 import { exec } from 'child_process';
+import os from 'os';
 import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
 import { getSystemSettings } from './runtime-config.js';
+
+const IS_WINDOWS = os.platform() === 'win32';
 
 export interface ScriptRunResult {
   stdout: string;
@@ -46,14 +49,15 @@ export async function runScript(
           maxBuffer: MAX_BUFFER,
           env: {
             PATH: process.env.PATH,
-            LANG: process.env.LANG || 'en_US.UTF-8',
+            ...(IS_WINDOWS
+              ? { USERPROFILE: cwd, SystemRoot: process.env.SystemRoot }
+              : { LANG: process.env.LANG || 'en_US.UTF-8', HOME: cwd }),
             TZ:
               process.env.TZ ||
               Intl.DateTimeFormat().resolvedOptions().timeZone,
             GROUP_FOLDER: groupFolder,
-            HOME: cwd,
           },
-          shell: '/bin/sh',
+          shell: IS_WINDOWS ? process.env.ComSpec || 'cmd.exe' : '/bin/sh',
         },
         (error, stdout, stderr) => {
           activeScriptCount--;

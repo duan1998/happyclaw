@@ -2004,15 +2004,25 @@ export function updateTaskAfterRun(
   id: string,
   nextRun: string | null,
   lastResult: string,
+  failed = false,
 ): void {
   const now = new Date().toISOString();
-  db.prepare(
-    `
-    UPDATE scheduled_tasks
-    SET next_run = ?, last_run = ?, last_result = ?, status = CASE WHEN ? IS NULL THEN 'completed' ELSE status END
-    WHERE id = ?
-  `,
-  ).run(nextRun, now, lastResult, nextRun, id);
+  if (nextRun === null && !failed) {
+    // once-task completed successfully → mark as completed
+    db.prepare(
+      `UPDATE scheduled_tasks SET next_run = NULL, last_run = ?, last_result = ?, status = 'completed' WHERE id = ?`,
+    ).run(now, lastResult, id);
+  } else if (nextRun === null && failed) {
+    // once-task failed → mark as paused so it can be retried manually
+    db.prepare(
+      `UPDATE scheduled_tasks SET last_run = ?, last_result = ?, status = 'paused' WHERE id = ?`,
+    ).run(now, lastResult, id);
+  } else {
+    // cron/interval task → keep status, update next_run
+    db.prepare(
+      `UPDATE scheduled_tasks SET next_run = ?, last_run = ?, last_result = ? WHERE id = ?`,
+    ).run(nextRun, now, lastResult, id);
+  }
 }
 
 export function logTaskRun(log: TaskRunLog): void {

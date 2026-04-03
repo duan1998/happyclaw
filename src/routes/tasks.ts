@@ -206,8 +206,7 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
   // Only admin can create/modify script tasks
   const isScriptTask =
     validation.data.execution_type === 'script' ||
-    (existing.execution_type === 'script' &&
-      validation.data.script_command !== undefined);
+    existing.execution_type === 'script';
   if (isScriptTask && authUser.role !== 'admin') {
     return c.json({ error: '只有管理员可以创建或修改脚本类型任务' }, 403);
   }
