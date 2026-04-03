@@ -198,7 +198,10 @@ export const GroupPatchSchema = z.object({
     .optional(),
   execution_mode: z.enum(['container', 'host']).optional(),
   default_runtime: z.enum(['claude', 'codex']).optional(),
-  default_model: z.string().max(100).optional().transform((val) => (val && val.trim() ? val.trim() : undefined)),
+  default_model: z.union([z.string().max(100), z.null()]).optional().transform((val) => {
+    if (val === null) return null;
+    return val && val.trim() ? val.trim() : undefined;
+  }),
 });
 
 export const LoginSchema = z.object({

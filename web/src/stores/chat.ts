@@ -193,7 +193,7 @@ interface ChatState {
   deleteMessage: (jid: string, messageId: string) => Promise<boolean>;
   createFlow: (name: string, options?: { execution_mode?: 'container' | 'host'; custom_cwd?: string; init_source_path?: string; init_git_url?: string; default_runtime?: 'claude' | 'codex' }) => Promise<{ jid: string; folder: string } | null>;
   renameFlow: (jid: string, name: string) => Promise<void>;
-  updateGroupRuntime: (jid: string, runtime: 'claude' | 'codex', model?: string) => Promise<boolean>;
+  updateGroupRuntime: (jid: string, runtime: 'claude' | 'codex', model?: string | null) => Promise<boolean>;
   togglePin: (jid: string) => Promise<void>;
   deleteFlow: (jid: string) => Promise<void>;
   handleStreamEvent: (chatJid: string, event: StreamEvent, agentId?: string) => void;
@@ -1139,9 +1139,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  updateGroupRuntime: async (jid: string, runtime: 'claude' | 'codex', model?: string) => {
+  updateGroupRuntime: async (jid: string, runtime: 'claude' | 'codex', model?: string | null) => {
     try {
-      const body: Record<string, string | undefined> = { default_runtime: runtime };
+      const body: Record<string, string | null | undefined> = { default_runtime: runtime };
       if (model !== undefined) body.default_model = model;
       await api.patch(`/api/groups/${encodeURIComponent(jid)}`, body);
       set((s) => {
@@ -1153,7 +1153,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             [jid]: {
               ...group,
               default_runtime: runtime,
-              ...(model !== undefined ? { default_model: model } : {}),
+              ...(model !== undefined ? { default_model: model ?? undefined } : {}),
             },
           },
         };

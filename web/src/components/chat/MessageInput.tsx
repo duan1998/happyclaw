@@ -39,6 +39,7 @@ const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 export interface ModelSelectorInfo {
   agentRuntime: 'claude' | 'codex';
   agentModel?: string;
+  hasExplicitModel?: boolean;
 }
 
 interface MessageInputProps {
@@ -48,7 +49,7 @@ interface MessageInputProps {
   onResetSession?: () => void;
   onToggleTerminal?: () => void;
   modelInfo?: ModelSelectorInfo;
-  onModelChange?: (model: string) => void;
+  onModelChange?: (model: string | null) => void;
 }
 
 export function MessageInput({
@@ -64,6 +65,12 @@ export function MessageInput({
   const [showActions, setShowActions] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
   const availableModels = useAvailableModels(modelInfo?.agentRuntime ?? 'claude');
+  const selectorModels = [
+    ...(modelInfo?.agentModel && !availableModels.includes(modelInfo.agentModel)
+      ? [modelInfo.agentModel]
+      : []),
+    ...availableModels,
+  ];
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [sending, setSending] = useState(false);
@@ -695,7 +702,7 @@ export function MessageInput({
                     modelInfo.agentRuntime === 'codex' ? 'bg-emerald-500' : 'bg-violet-500'
                   }`} />
                   <span className="max-w-[120px] truncate">
-                    {modelInfo.agentModel || availableModels[0] || '默认'}
+                    {modelInfo.agentModel || '默认'}
                   </span>
                   <ChevronDown className="w-3 h-3 flex-shrink-0" />
                 </button>
@@ -703,12 +710,23 @@ export function MessageInput({
                 {showModelMenu && (
                   <div className="absolute bottom-full right-0 mb-1 w-48 rounded-lg border border-border bg-popover shadow-lg overflow-hidden z-50 animate-in fade-in-0 slide-in-from-bottom-2 duration-150">
                     <div className="max-h-60 overflow-y-auto py-1">
-                      {availableModels.map((m) => (
+                      <button
+                        type="button"
+                        onClick={() => { onModelChange(null); setShowModelMenu(false); }}
+                        className={`w-full px-3 py-1.5 text-left text-sm transition-colors cursor-pointer ${
+                          modelInfo.hasExplicitModel
+                            ? 'text-foreground/80 hover:bg-muted'
+                            : 'bg-accent text-accent-foreground font-medium'
+                        }`}
+                      >
+                        默认
+                      </button>
+                      {selectorModels.map((m) => (
                         <button
                           key={m}
                           onClick={() => { onModelChange(m); setShowModelMenu(false); }}
                           className={`w-full px-3 py-1.5 text-left text-sm transition-colors cursor-pointer ${
-                            (modelInfo.agentModel || availableModels[0]) === m
+                            modelInfo.hasExplicitModel && modelInfo.agentModel === m
                               ? 'bg-accent text-accent-foreground font-medium'
                               : 'text-foreground/80 hover:bg-muted'
                           }`}

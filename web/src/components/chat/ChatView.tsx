@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useChatStore } from '../../stores/chat';
+import type { Message } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
@@ -46,6 +47,32 @@ const SIDEBAR_MAX_RATIO = 0.6;
 
 // Stable empty references to avoid infinite re-render loops in Zustand selectors
 const EMPTY_AGENTS: import('../../types').AgentInfo[] = [];
+
+function getPrimaryModelFromUsage(tokenUsage?: string): string | undefined {
+  if (!tokenUsage) return undefined;
+  try {
+    const usage = JSON.parse(tokenUsage) as {
+      modelUsage?: Record<string, { costUSD: number }>;
+    };
+    const models = usage.modelUsage ? Object.entries(usage.modelUsage) : [];
+    if (models.length === 0) return undefined;
+    models.sort((a, b) => (b[1].costUSD || 0) - (a[1].costUSD || 0));
+    return models[0]?.[0];
+  } catch {
+    return undefined;
+  }
+}
+
+function getCurrentSessionModel(messages?: Message[]): string | undefined {
+  if (!messages || messages.length === 0) return undefined;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (!msg.is_from_me || msg.source_kind === 'sdk_send_message') continue;
+    const model = getPrimaryModelFromUsage(msg.token_usage);
+    if (model) return model;
+  }
+  return undefined;
+}
 
 type SidebarTab = 'files' | 'env' | 'skills' | 'mcp' | 'members';
 
@@ -251,6 +278,14 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // Derived: active agent info and kind
   const activeAgent = activeAgentTab ? agents.find(a => a.id === activeAgentTab) : null;
   const isConversationTab = activeAgent?.kind === 'conversation';
+  const currentMainSessionModel = useMemo(
+    () => getCurrentSessionModel(groupMessages),
+    [groupMessages],
+  );
+  const currentAgentSessionModel = useMemo(
+    () => getCurrentSessionModel(activeAgentTab ? agentMessages[activeAgentTab] : undefined),
+    [activeAgentTab, agentMessages],
+  );
   // SDK Tasks 不再创建独立标签页，事件直接显示在主对话流式卡片中
 
   // Load sub-agents for this group
@@ -648,7 +683,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 onResetSession={() => { setResetAgentId(activeAgentTab); setShowResetConfirm(true); }}
                 modelInfo={activeAgent ? {
                   agentRuntime: activeAgent.agent_runtime ?? 'claude',
-                  agentModel: activeAgent.agent_model,
+                  agentModel: activeAgent.agent_model ?? currentAgentSessionModel,
+                  hasExplicitModel: !!activeAgent.agent_model,
                 } : undefined}
                 onModelChange={activeAgent ? (model) => {
                   updateAgentModel(groupJid, activeAgentTab!, undefined, model);
@@ -675,7 +711,11 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 groupJid={groupJid}
                 onResetSession={() => { setResetAgentId(null); setShowResetConfirm(true); }}
                 onToggleTerminal={canUseTerminal ? handleTerminalToggle : undefined}
-                modelInfo={{ agentRuntime: group?.default_runtime ?? 'claude', agentModel: group?.default_model }}
+                modelInfo={{
+                  agentRuntime: group?.default_runtime ?? 'claude',
+                  agentModel: group?.default_model ?? currentMainSessionModel,
+                  hasExplicitModel: !!group?.default_model,
+                }}
                 onModelChange={(model) => { updateGroupRuntime(groupJid, group?.default_runtime ?? 'claude', model); }}
               />
             </>

@@ -799,7 +799,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
           : existing.default_runtime,
       default_model:
         default_model !== undefined
-          ? default_model
+          ? (default_model ?? undefined)
           : existing.default_model,
     };
 
@@ -812,7 +812,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     success: true,
     pinned_at,
     default_runtime: default_runtime ?? existing.default_runtime ?? 'claude',
-    default_model: default_model ?? existing.default_model,
+    default_model:
+      default_model !== undefined
+        ? (default_model ?? undefined)
+        : existing.default_model,
   });
 });
 
