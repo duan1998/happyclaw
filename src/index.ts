@@ -5834,9 +5834,12 @@ async function startMessageLoop(): Promise<void> {
           }
           if (!group) continue;
 
-          // Skip groups with target_agent_id — their messages are routed
-          // to conversation agents at IM ingestion time (feishu.ts/telegram.ts)
-          if (group.target_agent_id) continue;
+          // Skip groups with target_agent_id or target_main_jid — their
+          // messages are routed at IM ingestion time (feishu.ts/telegram.ts
+          // etc.) via resolveEffectiveChatJid.  Any messages that still land
+          // under the original IM JID should NOT be processed by the home
+          // container they were auto-registered to.
+          if (group.target_agent_id || group.target_main_jid) continue;
 
           // Billing quota check before processing
           if (group.created_by) {
@@ -7017,6 +7020,10 @@ async function main(): Promise<void> {
         {
           ignoreMessagesBefore: Date.now(),
           onCommand: handleCommand,
+          resolveGroupFolder: (chatJid: string) =>
+            resolveEffectiveFolder(chatJid),
+          resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+          onAgentMessage: buildOnAgentMessage(),
           onBotAddedToGroup: buildOnNewChat(adminUser.id, homeFolder),
           onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
           shouldProcessGroupMessage,
@@ -7121,6 +7128,10 @@ async function main(): Promise<void> {
           {
             ignoreMessagesBefore,
             onCommand: handleCommand,
+            resolveGroupFolder: (chatJid: string) =>
+              resolveEffectiveFolder(chatJid),
+            resolveEffectiveChatJid: buildResolveEffectiveChatJid(),
+            onAgentMessage: buildOnAgentMessage(),
             onBotAddedToGroup: buildOnNewChat(userId, homeFolder),
             onBotRemovedFromGroup: buildOnBotRemovedFromGroup(),
             shouldProcessGroupMessage,
