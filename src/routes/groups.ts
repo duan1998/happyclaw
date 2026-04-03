@@ -70,7 +70,6 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { z } from 'zod';
@@ -442,38 +441,13 @@ groupRoutes.post('/', authMiddleware, async (c) => {
 
       // 白名单校验：检查路径是否在允许的根目录下
       const allowlist = loadMountAllowlist();
-      logger.info({ allowlist: allowlist ? { roots: allowlist.allowedRoots.length } : null, realPath, homedir: os.homedir() }, 'POST /api/groups: checking allowlist');
       if (
         allowlist &&
         allowlist.allowedRoots &&
         allowlist.allowedRoots.length > 0
       ) {
-        let allowed = false;
-        for (const root of allowlist.allowedRoots) {
-          const expandedRoot = root.path.startsWith('~')
-            ? path.join(
-                os.homedir(),
-                root.path.slice(root.path.startsWith('~/') ? 2 : 1),
-              )
-            : path.resolve(root.path);
-
-          let realRoot: string;
-          try {
-            realRoot = fs.realpathSync(expandedRoot);
-          } catch {
-            logger.warn({ expandedRoot }, 'POST /api/groups: allowed root does not exist, skip');
-            continue;
-          }
-
-          const relative = path.relative(realRoot, realPath);
-          logger.info({ rootPath: root.path, expandedRoot, realRoot, realPath, relative }, 'POST /api/groups: path check');
-          if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
-            allowed = true;
-            break;
-          }
-        }
-
-        if (!allowed) {
+        const allowedRoot = findAllowedRoot(realPath, allowlist.allowedRoots);
+        if (!allowedRoot) {
           const allowedPaths = allowlist.allowedRoots
             .map((r) => r.path)
             .join(', ');

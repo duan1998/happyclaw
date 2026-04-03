@@ -4,6 +4,39 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from '../../api/client';
 
+const WINDOWS_ABSOLUTE_PATH_RE = /^[A-Za-z]:[\\/]/;
+
+function isAbsoluteDirectoryPath(targetPath: string): boolean {
+  return targetPath.startsWith('/') || WINDOWS_ABSOLUTE_PATH_RE.test(targetPath);
+}
+
+function buildBreadcrumbs(targetPath: string): Array<{ name: string; path: string }> {
+  if (!targetPath) return [];
+
+  if (WINDOWS_ABSOLUTE_PATH_RE.test(targetPath)) {
+    const normalized = targetPath.replace(/\\/g, '/');
+    const [drive, ...segments] = normalized.split('/').filter(Boolean);
+    const breadcrumbs = [{ name: `${drive}\\`, path: `${drive}/` }];
+
+    for (let i = 0; i < segments.length; i += 1) {
+      breadcrumbs.push({
+        name: segments[i],
+        path: `${drive}/${segments.slice(0, i + 1).join('/')}`,
+      });
+    }
+
+    return breadcrumbs;
+  }
+
+  return targetPath
+    .split('/')
+    .filter(Boolean)
+    .map((part, i, arr) => ({
+      name: part,
+      path: '/' + arr.slice(0, i + 1).join('/'),
+    }));
+}
+
 interface DirectoryEntry {
   name: string;
   path: string;
@@ -60,7 +93,7 @@ export function DirectoryBrowser({ value, onChange, placeholder }: DirectoryBrow
     setBrowsing(true);
     setCreating(false);
     setNewFolderName('');
-    if (value && value.startsWith('/')) {
+    if (value && isAbsoluteDirectoryPath(value)) {
       fetchDirectories(value);
     } else {
       fetchDirectories();
@@ -107,15 +140,7 @@ export function DirectoryBrowser({ value, onChange, placeholder }: DirectoryBrow
   };
 
   // Build breadcrumbs from currentPath
-  const breadcrumbs = currentPath
-    ? currentPath
-        .split('/')
-        .filter(Boolean)
-        .map((part, i, arr) => ({
-          name: part,
-          path: '/' + arr.slice(0, i + 1).join('/'),
-        }))
-    : [];
+  const breadcrumbs = currentPath ? buildBreadcrumbs(currentPath) : [];
 
   return (
     <div>

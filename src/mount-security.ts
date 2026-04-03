@@ -40,6 +40,8 @@ const DEFAULT_BLOCKED_PATTERNS = [
   '.secret',
 ];
 
+const WINDOWS_DRIVE_WILDCARD = '*:\\';
+
 /**
  * Load the mount allowlist from the external config location.
  * Returns null if the file doesn't exist or is invalid.
@@ -126,6 +128,25 @@ export function expandPath(p: string): string {
   return path.resolve(p);
 }
 
+function isWindowsDriveWildcard(pathValue: string): boolean {
+  return process.platform === 'win32' && pathValue === WINDOWS_DRIVE_WILDCARD;
+}
+
+export function listAllowedRootPaths(root: AllowedRoot): string[] {
+  if (isWindowsDriveWildcard(root.path)) {
+    const drives: string[] = [];
+    for (let code = 65; code <= 90; code += 1) {
+      const driveRoot = `${String.fromCharCode(code)}:\\`;
+      if (fs.existsSync(driveRoot)) {
+        drives.push(driveRoot);
+      }
+    }
+    return drives;
+  }
+
+  return [expandPath(root.path)];
+}
+
 /**
  * Get the real path, resolving symlinks.
  * Returns null if the path doesn't exist.
@@ -167,18 +188,19 @@ export function findAllowedRoot(
   allowedRoots: AllowedRoot[],
 ): AllowedRoot | null {
   for (const root of allowedRoots) {
-    const expandedRoot = expandPath(root.path);
-    const realRoot = getRealPath(expandedRoot);
+    for (const expandedRoot of listAllowedRootPaths(root)) {
+      const realRoot = getRealPath(expandedRoot);
 
-    if (realRoot === null) {
-      // Allowed root doesn't exist, skip it
-      continue;
-    }
+      if (realRoot === null) {
+        // Allowed root doesn't exist, skip it
+        continue;
+      }
 
-    // Check if realPath is under realRoot
-    const relative = path.relative(realRoot, realPath);
-    if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
-      return root;
+      // Check if realPath is under realRoot
+      const relative = path.relative(realRoot, realPath);
+      if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+        return root;
+      }
     }
   }
 

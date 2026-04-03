@@ -8,8 +8,8 @@ import type { AuthUser } from '../types.js';
 import { logger } from '../logger.js';
 import {
   loadMountAllowlist,
-  expandPath,
   findAllowedRoot,
+  listAllowedRootPaths,
   matchesBlockedPattern,
 } from '../mount-security.js';
 
@@ -84,32 +84,44 @@ browseRoutes.get('/directories', authMiddleware, (c) => {
     if (hasAllowlist) {
       // Return allowlist roots as top-level entries
       const roots: DirectoryEntry[] = [];
+      const seenPaths = new Set<string>();
       for (const root of allowlist!.allowedRoots) {
-        const expanded = expandPath(root.path);
-        let realPath: string;
-        try {
-          realPath = fs.realpathSync(expanded);
-        } catch {
-          continue; // Root doesn't exist, skip
-        }
-        if (!fs.existsSync(realPath) || !fs.statSync(realPath).isDirectory())
-          continue;
+        for (const allowedPath of listAllowedRootPaths(root)) {
+          let realPath: string;
+          try {
+            realPath = fs.realpathSync(allowedPath);
+          } catch {
+            continue; // Root doesn't exist, skip
+          }
+          if (
+            !fs.existsSync(realPath) ||
+            !fs.statSync(realPath).isDirectory() ||
+            seenPaths.has(realPath)
+          ) {
+            continue;
+          }
 
-        let hasChildren = false;
-        try {
-          const children = fs.readdirSync(realPath, { withFileTypes: true });
-          hasChildren = children.some(
-            (ch) => ch.isDirectory() && !ch.name.startsWith('.'),
-          );
-        } catch {
-          /* ignore */
-        }
+          seenPaths.add(realPath);
 
-        roots.push({
-          name: root.description || path.basename(realPath),
-          path: realPath,
-          hasChildren,
-        });
+          let hasChildren = false;
+          try {
+            const children = fs.readdirSync(realPath, { withFileTypes: true });
+            hasChildren = children.some(
+              (ch) => ch.isDirectory() && !ch.name.startsWith('.'),
+            );
+          } catch {
+            /* ignore */
+          }
+
+          roots.push({
+            name:
+              root.description ||
+              realPath.replace(/[\\/]$/, '') ||
+              realPath,
+            path: realPath,
+            hasChildren,
+          });
+        }
       }
 
       return c.json({

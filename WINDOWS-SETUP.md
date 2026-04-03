@@ -116,15 +116,13 @@ path.dirname(fileURLToPath(import.meta.url)),
 
 **文件**：`config/mount-allowlist.json`
 
-默认只允许 home 目录（`~`）。如果项目在其他盘符，需要手动添加：
+Windows 下可直接用 `*:\\` 允许所有已存在的本地/映射盘符，无需逐个手动追加：
 
 ```json
 {
   "allowedRoots": [
     { "path": "~", "allowReadWrite": true, "description": "Home directory" },
-    { "path": "C:\\", "allowReadWrite": true, "description": "C drive" },
-    { "path": "D:\\", "allowReadWrite": true, "description": "D drive" },
-    { "path": "E:\\", "allowReadWrite": true, "description": "E drive" }
+    { "path": "*:\\", "allowReadWrite": true }
   ],
   "blockedPatterns": [],
   "nonMainReadOnly": true

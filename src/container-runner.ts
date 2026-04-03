@@ -18,6 +18,7 @@ import { CONTAINER_IMAGE, DATA_DIR, GROUPS_DIR } from './config.js';
 import { logger } from './logger.js';
 import { writeDebugLog, getDebugLogPath } from './debug-log.js';
 import {
+  findAllowedRoot,
   loadMountAllowlist,
   validateAdditionalMounts,
 } from './mount-security.js';
@@ -868,30 +869,7 @@ export async function runHostAgent(
       allowlist.allowedRoots &&
       allowlist.allowedRoots.length > 0
     ) {
-      let allowed = false;
-      for (const root of allowlist.allowedRoots) {
-        const expandedRoot = root.path.startsWith('~')
-          ? path.join(
-              process.env.HOME || '/Users/user',
-              root.path.slice(root.path.startsWith('~/') ? 2 : 1),
-            )
-          : path.resolve(root.path);
-
-        let realRoot: string;
-        try {
-          realRoot = fs.realpathSync(expandedRoot);
-        } catch {
-          continue;
-        }
-
-        const relative = path.relative(realRoot, groupDir);
-        if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
-          allowed = true;
-          break;
-        }
-      }
-
-      if (!allowed) {
+      if (!findAllowedRoot(groupDir, allowlist.allowedRoots)) {
         return hostModeSetupError(
           `工作目录 ${groupDir} 不在允许的根目录下，请检查 mount-allowlist.json`,
         );
