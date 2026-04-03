@@ -88,6 +88,7 @@ import {
   ASSISTANT_NAME,
 } from './config.js';
 import { logger } from './logger.js';
+import { writeDebugLog } from './debug-log.js';
 import { executeSessionReset } from './commands.js';
 import {
   normalizeImageAttachments,
@@ -1561,8 +1562,8 @@ export function broadcastAgentStatus(
 ): void {
   const jid = normalizeHomeJid(chatJid);
   const allowedUserIds = getGroupAllowedUserIds(chatJid);
-  // Resolve kind from DB if not provided
-  const resolvedKind = kind || getAgent(agentId)?.kind;
+  const agentRecord = getAgent(agentId);
+  const resolvedKind = kind || agentRecord?.kind;
   const msg: WsMessageOut = {
     type: 'agent_status',
     chatJid: jid,
@@ -1572,7 +1573,10 @@ export function broadcastAgentStatus(
     name,
     prompt,
     resultSummary,
+    agent_runtime: agentRecord?.agent_runtime,
+    agent_model: agentRecord?.agent_model,
   };
+  writeDebugLog('WS_AGENT_STATUS', `id=${agentId} status=${status} runtime=${agentRecord?.agent_runtime ?? 'N/A'} model=${agentRecord?.agent_model ?? 'N/A'}`);
   safeBroadcast(msg, isHostGroupJid(chatJid), allowedUserIds);
 }
 

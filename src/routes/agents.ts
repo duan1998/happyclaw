@@ -30,6 +30,7 @@ import type { RegisteredGroup, SubAgent } from '../types.js';
 import { logger } from '../logger.js';
 import { getChannelType, extractChatId } from '../im-channel.js';
 import { ensureAgentDirectories } from '../utils.js';
+import { writeDebugLog } from '../debug-log.js';
 
 const router = new Hono<{ Variables: Variables }>();
 
@@ -141,6 +142,8 @@ router.post('/:jid/agents', authMiddleware, async (c) => {
   // Import dynamically to avoid circular deps
   const { broadcastAgentStatus } = await import('../web.js');
   broadcastAgentStatus(jid, agentId, 'idle', name, description);
+
+  writeDebugLog('AGENT_CREATE', `id=${agentId} runtime=${agentRuntime} model=${agentModel ?? 'default'} name=${name}`);
 
   logger.info(
     { agentId, jid, name, userId: user.id },

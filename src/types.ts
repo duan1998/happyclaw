@@ -349,6 +349,8 @@ export type WsMessageOut =
       name: string;
       prompt: string;
       resultSummary?: string;
+      agent_runtime?: string;
+      agent_model?: string;
     }
   | {
       type: 'runner_state';

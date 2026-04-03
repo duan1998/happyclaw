@@ -197,7 +197,7 @@ interface ChatState {
   deleteFlow: (jid: string) => Promise<void>;
   handleStreamEvent: (chatJid: string, event: StreamEvent, agentId?: string) => void;
   handleWsNewMessage: (chatJid: string, wsMsg: any, agentId?: string, source?: string) => void;
-  handleAgentStatus: (chatJid: string, agentId: string, status: AgentInfo['status'], name: string, prompt: string, resultSummary?: string, kind?: AgentInfo['kind']) => void;
+  handleAgentStatus: (chatJid: string, agentId: string, status: AgentInfo['status'], name: string, prompt: string, resultSummary?: string, kind?: AgentInfo['kind'], agentRuntime?: string, agentModel?: string) => void;
   clearStreaming: (
     chatJid: string,
     options?: { preserveThinking?: boolean },
@@ -1693,7 +1693,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // 处理子 Agent 状态变更事件
-  handleAgentStatus: (chatJid, agentId, status, name, prompt, resultSummary?, kind?) => {
+  handleAgentStatus: (chatJid, agentId, status, name, prompt, resultSummary?, kind?, agentRuntime?, agentModel?) => {
     set((s) => {
       const existing = s.agents[chatJid] || [];
 
@@ -1741,8 +1741,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         created_at: prev?.created_at ?? new Date().toISOString(),
         completed_at: (status === 'completed' || status === 'error') ? new Date().toISOString() : undefined,
         result_summary: resultSummary,
-        agent_runtime: prev?.agent_runtime,
-        agent_model: prev?.agent_model,
+        agent_runtime: agentRuntime !== undefined ? agentRuntime : prev?.agent_runtime,
+        agent_model: agentModel !== undefined ? agentModel : prev?.agent_model,
         linked_im_groups: prev?.linked_im_groups,
       };
       const updated = idx >= 0
@@ -1936,8 +1936,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
       set((s) => {
         const existing = s.agents[jid] || [];
-        // WS agent_status broadcast may have already added it
-        if (existing.some((a) => a.id === data.agent.id)) return s;
+        const idx = existing.findIndex((a) => a.id === data.agent.id);
+        if (idx >= 0) {
+          const merged = { ...existing[idx], ...data.agent };
+          const updated = existing.map((a, i) => (i === idx ? merged : a));
+          return { agents: { ...s.agents, [jid]: updated } };
+        }
         return { agents: { ...s.agents, [jid]: [...existing, data.agent] } };
       });
       return data.agent;

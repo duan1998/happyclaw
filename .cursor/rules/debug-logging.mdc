@@ -1,0 +1,25 @@
+---
+description: 调试日志输出规范
+alwaysApply: true
+---
+
+# 调试日志规范
+
+## 后端日志
+
+需要输出调试日志时，使用 `src/debug-log.ts` 提供的 `writeDebugLog(tag, message)` 函数，日志统一写入用户数据目录下的 `debug.log` 文件（`DATA_DIR/debug.log`，桌面端路径为 `%APPDATA%/happyclaw-desktop/data/debug.log`）。
+
+```typescript
+import { writeDebugLog } from './debug-log.js';
+writeDebugLog('TAG', '日志内容');
+```
+
+**不要**用 `console.log` 输出调试信息——桌面端（Electron）的 stdout 不可见，只有 `debug.log` 文件可以持久查看。
+
+pino logger（`logger.info` 等）用于常规运行日志，`writeDebugLog` 用于临时调试和排查问题。
+
+## 前端日志
+
+前端无法直接写入 `debug.log`。需要调试时：
+- 在后端 API 处理函数 / WebSocket 消息处理中加 `writeDebugLog` 输出关键数据
+- 前端可用 `console.log` 配合浏览器 DevTools 排查，但不作为主要调试手段
