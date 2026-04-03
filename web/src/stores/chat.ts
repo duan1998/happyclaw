@@ -1741,7 +1741,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         created_at: prev?.created_at ?? new Date().toISOString(),
         completed_at: (status === 'completed' || status === 'error') ? new Date().toISOString() : undefined,
         result_summary: resultSummary,
-        agent_runtime: agentRuntime !== undefined ? agentRuntime : prev?.agent_runtime,
+        agent_runtime: agentRuntime !== undefined ? agentRuntime as 'claude' | 'codex' : prev?.agent_runtime,
         agent_model: agentModel !== undefined ? agentModel : prev?.agent_model,
         linked_im_groups: prev?.linked_im_groups,
       };
