@@ -36,6 +36,8 @@ const MIME_MAP: Record<string, string> = {
   jpg: 'image/jpeg',
   jpeg: 'image/jpeg',
   gif: 'image/gif',
+  bmp: 'image/bmp',
+  ico: 'image/x-icon',
   svg: 'image/svg+xml',
   webp: 'image/webp',
   // 文本和代码
@@ -66,6 +68,23 @@ const MIME_MAP: Record<string, string> = {
   csv: 'text/csv',
   // PDF
   pdf: 'application/pdf',
+  // Office
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  // 视频
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mov: 'video/quicktime',
+  avi: 'video/x-msvideo',
+  mkv: 'video/x-matroska',
+  // 音频
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+  ogg: 'audio/ogg',
+  m4a: 'audio/mp4',
+  flac: 'audio/flac',
   // 压缩文件
   zip: 'application/zip',
   tar: 'application/x-tar',
@@ -108,6 +127,8 @@ const SAFE_PREVIEW_MIME_TYPES = new Set([
   'image/png',
   'image/jpeg',
   'image/gif',
+  'image/bmp',
+  'image/x-icon',
   'image/webp',
   'text/plain',
   'text/markdown',
@@ -127,6 +148,16 @@ const SAFE_PREVIEW_MIME_TYPES = new Set([
   'application/json',
   'application/xml',
   'application/pdf',
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+  'video/x-msvideo',
+  'video/x-matroska',
+  'audio/mpeg',
+  'audio/wav',
+  'audio/ogg',
+  'audio/mp4',
+  'audio/flac',
 ]);
 
 /**
@@ -173,6 +204,61 @@ function parseSingleRange(
   if (!Number.isInteger(parsedEnd) || parsedEnd < start) return null;
 
   return { start, end: Math.min(parsedEnd, fileSize - 1) };
+}
+
+function isMediaMimeType(mimeType: string): boolean {
+  return mimeType.startsWith('video/') || mimeType.startsWith('audio/');
+}
+
+function createStreamResponse(
+  absolutePath: string,
+  fileSize: number,
+  commonHeaders: Record<string, string>,
+  rangeHeader?: string,
+): Response {
+  if (rangeHeader) {
+    const normalizedRange = rangeHeader.trim();
+    const isBytesRange = normalizedRange.toLowerCase().startsWith('bytes=');
+    const isMultiRange = isBytesRange && normalizedRange.includes(',');
+
+    // 多区间请求当前未实现 multipart/byteranges，回退为完整响应
+    if (isBytesRange && !isMultiRange) {
+      const parsedRange = parseSingleRange(normalizedRange, fileSize);
+      if (!parsedRange) {
+        return new Response(null, {
+          status: 416,
+          headers: {
+            ...commonHeaders,
+            'Content-Range': `bytes */${fileSize}`,
+          },
+        });
+      }
+
+      const { start, end } = parsedRange;
+      const stream = Readable.toWeb(
+        fs.createReadStream(absolutePath, { start, end }),
+      ) as ReadableStream<Uint8Array>;
+      return new Response(stream, {
+        status: 206,
+        headers: {
+          ...commonHeaders,
+          'Content-Length': String(end - start + 1),
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+        },
+      });
+    }
+  }
+
+  const stream = Readable.toWeb(
+    fs.createReadStream(absolutePath),
+  ) as ReadableStream<Uint8Array>;
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      ...commonHeaders,
+      'Content-Length': String(fileSize),
+    },
+  });
 }
 
 async function openDirectoryInFileManager(targetDir: string): Promise<void> {
@@ -461,50 +547,12 @@ fileRoutes.get('/:jid/files/download/:path', authMiddleware, (c) => {
       'Accept-Ranges': 'bytes',
     };
 
-    const rangeHeader = c.req.header('range');
-    if (rangeHeader) {
-      const normalizedRange = rangeHeader.trim();
-      const isBytesRange = normalizedRange.toLowerCase().startsWith('bytes=');
-      const isMultiRange = isBytesRange && normalizedRange.includes(',');
-
-      // 多区间请求当前未实现 multipart/byteranges，回退为完整下载响应
-      if (isBytesRange && !isMultiRange) {
-        const parsedRange = parseSingleRange(normalizedRange, fileSize);
-        if (!parsedRange) {
-          return new Response(null, {
-            status: 416,
-            headers: {
-              ...commonHeaders,
-              'Content-Range': `bytes */${fileSize}`,
-            },
-          });
-        }
-
-        const { start, end } = parsedRange;
-        const stream = Readable.toWeb(
-          fs.createReadStream(absolutePath, { start, end }),
-        ) as ReadableStream<Uint8Array>;
-        return new Response(stream, {
-          status: 206,
-          headers: {
-            ...commonHeaders,
-            'Content-Length': String(end - start + 1),
-            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-          },
-        });
-      }
-    }
-
-    const stream = Readable.toWeb(
-      fs.createReadStream(absolutePath),
-    ) as ReadableStream<Uint8Array>;
-    return new Response(stream, {
-      status: 200,
-      headers: {
-        ...commonHeaders,
-        'Content-Length': String(fileSize),
-      },
-    });
+    return createStreamResponse(
+      absolutePath,
+      fileSize,
+      commonHeaders,
+      c.req.header('range'),
+    );
   } catch (error) {
     logger.error({ err: error }, `Failed to download file for ${jid}`);
     return c.json({ error: 'Failed to download file' }, 500);
@@ -556,28 +604,42 @@ fileRoutes.get('/:jid/files/preview/:path', authMiddleware, (c) => {
     const ext = path.extname(absolutePath).slice(1).toLowerCase();
     const mimeType = MIME_MAP[ext] || 'application/octet-stream';
 
-    // 读取文件并返回
-    const fileContent = fs.readFileSync(absolutePath);
     const fileName = path.basename(absolutePath);
-
-    // 安全头：始终添加 CSP sandbox 和 nosniff
-    c.header('Content-Security-Policy', "default-src 'none'; sandbox");
-    c.header('X-Content-Type-Options', 'nosniff');
+    const fileSize = stats.size;
 
     if (SAFE_PREVIEW_MIME_TYPES.has(mimeType)) {
-      // 安全类型：允许 inline 预览
-      c.header('Content-Type', mimeType);
-      c.header('Content-Disposition', 'inline');
-    } else {
-      // 不安全类型（HTML、SVG 等）：强制下载
-      c.header('Content-Type', 'application/octet-stream');
-      c.header(
-        'Content-Disposition',
-        `attachment; filename="${encodeURIComponent(fileName)}"`,
-      );
-    }
+      const commonHeaders = {
+        'Content-Type': mimeType,
+        'Content-Disposition': 'inline',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        ...(isMediaMimeType(mimeType) ? { 'Accept-Ranges': 'bytes' } : {}),
+      };
 
-    return c.body(fileContent);
+      if (isMediaMimeType(mimeType)) {
+        return createStreamResponse(
+          absolutePath,
+          fileSize,
+          commonHeaders,
+          c.req.header('range'),
+        );
+      }
+
+      return new Response(fs.readFileSync(absolutePath), {
+        status: 200,
+        headers: commonHeaders,
+      });
+    } else {
+      return new Response(fs.readFileSync(absolutePath), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Disposition': buildAttachmentContentDisposition(fileName),
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Security-Policy': "default-src 'none'; sandbox",
+        },
+      });
+    }
   } catch (error) {
     logger.error({ err: error }, `Failed to preview file for ${jid}`);
     return c.json({ error: 'Failed to preview file' }, 500);
