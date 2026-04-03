@@ -5,6 +5,7 @@ import { useFileStore } from './files';
 import { useAuthStore } from './auth';
 import { showToast, notifyIfHidden, shouldEmitBackgroundTaskNotice } from '../utils/toast';
 import type { GroupInfo, AgentInfo, AvailableImGroup } from '../types';
+import { getPreferredGroupJid } from '../utils/group-management';
 
 export type { GroupInfo, AgentInfo };
 
@@ -755,14 +756,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         let nextCurrent = currentStillExists ? state.currentGroup : null;
         if (!nextCurrent) {
-          const homeEntry = Object.entries(data.groups).find(
-            ([_, group]) => group.is_my_home,
-          );
-          if (homeEntry) {
-            nextCurrent = homeEntry[0];
-          } else {
-            nextCurrent = Object.keys(data.groups)[0] || null;
-          }
+          nextCurrent = getPreferredGroupJid(data.groups);
         }
 
         return {
@@ -1216,10 +1210,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         delete nextPendingThinking[jid];
 
         let nextCurrent = s.currentGroup === jid ? null : s.currentGroup;
-        // Auto-select first remaining group after deletion
         if (nextCurrent === null) {
-          const remainingJids = Object.keys(nextGroups);
-          nextCurrent = remainingJids.length > 0 ? remainingJids[0] : null;
+          nextCurrent = getPreferredGroupJid(nextGroups);
         }
 
         return {
@@ -1239,9 +1231,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     } catch (err: unknown) {
       const apiErr = err as { status?: number; body?: Record<string, unknown>; message?: string };
-      if (apiErr.status === 409 && apiErr.body?.bound_agents) {
-        const e = new Error(apiErr.message || 'IM binding conflict') as Error & { boundAgents: unknown };
-        e.boundAgents = apiErr.body.bound_agents;
+      if (
+        apiErr.status === 409 &&
+        (apiErr.body?.bound_agents || apiErr.body?.bound_main_im_groups)
+      ) {
+        const e = new Error(apiErr.message || 'IM binding conflict') as Error & {
+          boundAgents?: unknown;
+          boundMainImGroups?: unknown;
+        };
+        e.boundAgents = apiErr.body?.bound_agents;
+        e.boundMainImGroups = apiErr.body?.bound_main_im_groups;
         throw e;
       }
       set({ error: apiErr.message || (err instanceof Error ? err.message : String(err)) });

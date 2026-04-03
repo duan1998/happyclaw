@@ -17,7 +17,11 @@ import type { Variables } from '../web-context.js';
 import type { AuthUser, RegisteredGroup } from '../types.js';
 import { authMiddleware } from '../middleware/auth.js';
 import { GROUPS_DIR } from '../config.js';
-import { canAccessGroup } from '../web-context.js';
+import {
+  canModifyGroup,
+  hasHostExecutionPermission,
+  isHostExecutionGroup,
+} from '../web-context.js';
 import { getRegisteredGroup } from '../db.js';
 import {
   parseFrontmatter,
@@ -194,20 +198,31 @@ function syncMcpToSettings(
 
 function resolveGroup(
   c: Context<{ Variables: Variables }>,
-): (RegisteredGroup & { jid: string }) | null {
+):
+  | { group: RegisteredGroup & { jid: string } }
+  | { response: Response } {
   const jid = c.req.param('jid');
   const authUser = c.get('user') as AuthUser;
 
   const group = getRegisteredGroup(jid);
   if (!group) {
-    return null;
+    return { response: c.json({ error: 'Group not found' }, 404) };
   }
 
-  if (!canAccessGroup(authUser, group)) {
-    return null;
+  if (!canModifyGroup(authUser, group)) {
+    return { response: c.json({ error: 'Group not found' }, 404) };
   }
 
-  return group;
+  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+    return {
+      response: c.json(
+        { error: 'Insufficient permissions for host execution mode' },
+        403,
+      ),
+    };
+  }
+
+  return { group };
 }
 
 // ===========================
@@ -219,8 +234,9 @@ workspaceConfigRoutes.get(
   '/:jid/workspace-config/skills',
   authMiddleware,
   async (c) => {
-    const group = resolveGroup(c);
-    if (!group) return c.json({ error: 'Group not found or access denied' }, 404);
+    const resolved = resolveGroup(c);
+    if ('response' in resolved) return resolved.response;
+    const { group } = resolved;
 
     const seen = new Set<string>();
     const skills: ReturnType<typeof scanSkillDirectory> = [];
@@ -242,8 +258,9 @@ workspaceConfigRoutes.post(
   '/:jid/workspace-config/skills/install',
   authMiddleware,
   async (c) => {
-    const group = resolveGroup(c);
-    if (!group) return c.json({ error: 'Group not found or access denied' }, 404);
+    const resolved = resolveGroup(c);
+    if ('response' in resolved) return resolved.response;
+    const { group } = resolved;
 
     const body = await c.req.json().catch(() => ({}));
     const pkg = typeof body.package === 'string' ? body.package.trim() : '';
@@ -347,8 +364,9 @@ workspaceConfigRoutes.patch(
   '/:jid/workspace-config/skills/:id',
   authMiddleware,
   async (c) => {
-    const group = resolveGroup(c);
-    if (!group) return c.json({ error: 'Group not found or access denied' }, 404);
+    const resolved = resolveGroup(c);
+    if ('response' in resolved) return resolved.response;
+    const { group } = resolved;
 
     const id = c.req.param('id');
     if (!validateSkillId(id)) {
@@ -392,8 +410,9 @@ workspaceConfigRoutes.delete(
   '/:jid/workspace-config/skills/:id',
   authMiddleware,
   async (c) => {
-    const group = resolveGroup(c);
-    if (!group) return c.json({ error: 'Group not found or access denied' }, 404);
+    const resolved = resolveGroup(c);
+    if ('response' in resolved) return resolved.response;
+    const { group } = resolved;
 
     const id = c.req.param('id');
     if (!validateSkillId(id)) {
@@ -424,8 +443,9 @@ workspaceConfigRoutes.get(
   '/:jid/workspace-config/mcp-servers',
   authMiddleware,
   async (c) => {
-    const group = resolveGroup(c);
-    if (!group) return c.json({ error: 'Group not found or access denied' }, 404);
+    const resolved = resolveGroup(c);
+    if ('response' in resolved) return resolved.response;
+    const { group } = resolved;
 
     const meta = readWorkspaceMeta(group);
     const settings = readWorkspaceSettings(group);
@@ -476,8 +496,9 @@ workspaceConfigRoutes.post(
   '/:jid/workspace-config/mcp-servers',
   authMiddleware,
   async (c) => {
-    const group = resolveGroup(c);
-    if (!group) return c.json({ error: 'Group not found or access denied' }, 404);
+    const resolved = resolveGroup(c);
+    if ('response' in resolved) return resolved.response;
+    const { group } = resolved;
 
     const body = await c.req.json().catch(() => ({}));
     const { id, command, args, env, description, type, url, headers } =
@@ -544,8 +565,9 @@ workspaceConfigRoutes.patch(
   '/:jid/workspace-config/mcp-servers/:id',
   authMiddleware,
   async (c) => {
-    const group = resolveGroup(c);
-    if (!group) return c.json({ error: 'Group not found or access denied' }, 404);
+    const resolved = resolveGroup(c);
+    if ('response' in resolved) return resolved.response;
+    const { group } = resolved;
 
     const id = c.req.param('id');
     if (!/^[\w\-]+$/.test(id)) {
@@ -615,8 +637,9 @@ workspaceConfigRoutes.delete(
   '/:jid/workspace-config/mcp-servers/:id',
   authMiddleware,
   async (c) => {
-    const group = resolveGroup(c);
-    if (!group) return c.json({ error: 'Group not found or access denied' }, 404);
+    const resolved = resolveGroup(c);
+    if ('response' in resolved) return resolved.response;
+    const { group } = resolved;
 
     const id = c.req.param('id');
     if (!/^[\w\-]+$/.test(id)) {

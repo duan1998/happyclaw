@@ -122,12 +122,24 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
   // Sidebar: members tab visibility
   const isHome = !!group?.is_home;
   const showMembersTab = (!!group?.is_shared || group?.member_role === 'owner') && !isHome;
-  const visibleTabs = SIDEBAR_TABS.filter(t => t.id !== 'members' || showMembersTab);
+  const canManageWorkspaceConfig = !!group && (isHome || group.member_role === 'owner');
+  const visibleTabs = SIDEBAR_TABS.filter((tab) => {
+    if (tab.id === 'members') return showMembersTab;
+    if ((tab.id === 'skills' || tab.id === 'mcp') && !canManageWorkspaceConfig) {
+      return false;
+    }
+    return true;
+  });
 
   // Fallback: if current tab is hidden, reset to files
   useEffect(() => {
-    if (sidebarTab === 'members' && !showMembersTab) setSidebarTab('files');
-  }, [sidebarTab, showMembersTab]);
+    if (
+      (sidebarTab === 'members' && !showMembersTab) ||
+      ((sidebarTab === 'skills' || sidebarTab === 'mcp') && !canManageWorkspaceConfig)
+    ) {
+      setSidebarTab('files');
+    }
+  }, [sidebarTab, showMembersTab, canManageWorkspaceConfig]);
 
   // Fetch IM connection status for home groups
   const isOwnHome =
@@ -789,18 +801,22 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
             >
               环境变量
             </button>
-            <button
-              onClick={() => { setMobileActionsOpen(false); setMobilePanel('skills'); }}
-              className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
-            >
-              工作区 Skills
-            </button>
-            <button
-              onClick={() => { setMobileActionsOpen(false); setMobilePanel('mcp'); }}
-              className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
-            >
-              工作区 MCP
-            </button>
+            {canManageWorkspaceConfig && (
+              <button
+                onClick={() => { setMobileActionsOpen(false); setMobilePanel('skills'); }}
+                className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
+              >
+                工作区 Skills
+              </button>
+            )}
+            {canManageWorkspaceConfig && (
+              <button
+                onClick={() => { setMobileActionsOpen(false); setMobilePanel('mcp'); }}
+                className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
+              >
+                工作区 MCP
+              </button>
+            )}
             {showMembersTab && (
               <button
                 onClick={() => { setMobileActionsOpen(false); setMobilePanel('members'); }}

@@ -1686,8 +1686,20 @@ groupRoutes.put('/:jid/mcp', authMiddleware, async (c) => {
   if (!group) return c.json({ error: 'Group not found' }, 404);
 
   const authUser = c.get('user') as AuthUser;
-  if (!canAccessGroup({ id: authUser.id, role: authUser.role }, group)) {
+  if (
+    !canModifyGroup(
+      { id: authUser.id, role: authUser.role },
+      { ...group, jid },
+    )
+  ) {
     return c.json({ error: 'Group not found' }, 404);
+  }
+
+  if (isHostExecutionGroup(group) && !hasHostExecutionPermission(authUser)) {
+    return c.json(
+      { error: 'Insufficient permissions for host execution mode' },
+      403,
+    );
   }
 
   const body = await c.req.json().catch(() => ({}));
