@@ -87,7 +87,6 @@ import { logger } from '../logger.js';
 import {
   checkImChannelLimit,
   isBillingEnabled,
-  clearBillingEnabledCache,
 } from '../billing.js';
 import { providerPool } from '../provider-pool.js';
 
@@ -826,6 +825,7 @@ configRoutes.put(
     }
 
     try {
+      const actor = (c.get('user') as AuthUser).username;
       // Find first enabled provider and update its customEnv
       const enabled = getEnabledProviders();
       if (enabled.length === 0) {
@@ -834,6 +834,10 @@ configRoutes.put(
 
       const updated = updateProvider(enabled[0].id, {
         customEnv: validation.data.customEnv,
+      });
+      appendClaudeConfigAudit(actor, 'update_custom_env', ['customEnv'], {
+        providerId: enabled[0].id,
+        customEnvKeys: Object.keys(updated.customEnv || {}).sort(),
       });
       return c.json({ customEnv: updated.customEnv });
     } catch (err) {
@@ -1215,8 +1219,13 @@ configRoutes.put(
     }
 
     try {
+      const actor = (c.get('user') as AuthUser).username;
       const saved = saveSystemSettings(validation.data);
-      clearBillingEnabledCache();
+      appendClaudeConfigAudit(
+        actor,
+        'update_system_settings',
+        Object.keys(validation.data).sort(),
+      );
       return c.json(saved);
     } catch (err) {
       const message =

@@ -8,9 +8,14 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import type { Variables } from '../web-context.js';
 import type { AuthUser } from '../types.js';
-import { authMiddleware } from '../middleware/auth.js';
+import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
 import { DATA_DIR } from '../config.js';
-import { getSystemSettings, saveSystemSettings, type SystemSettings } from '../runtime-config.js';
+import {
+  appendClaudeConfigAudit,
+  getSystemSettings,
+  saveSystemSettings,
+  type SystemSettings,
+} from '../runtime-config.js';
 import {
   parseFrontmatter,
   validateSkillId,
@@ -620,12 +625,9 @@ skillsRoutes.get('/sync-status', authMiddleware, (c) => {
   });
 });
 
-// Toggle auto-sync on/off (admin only)
-skillsRoutes.put('/sync-settings', authMiddleware, async (c) => {
+// Toggle auto-sync on/off (requires system config permission)
+skillsRoutes.put('/sync-settings', authMiddleware, systemConfigMiddleware, async (c) => {
   const authUser = c.get('user') as AuthUser;
-  if (authUser.role !== 'admin') {
-    return c.json({ error: 'Only admin can change sync settings' }, 403);
-  }
   const body = await c.req.json().catch(() => ({}));
   const updates: Partial<SystemSettings> = {};
   if (typeof body.autoSyncEnabled === 'boolean') {
@@ -635,6 +637,11 @@ skillsRoutes.put('/sync-settings', authMiddleware, async (c) => {
     updates.skillAutoSyncIntervalMinutes = body.autoSyncIntervalMinutes;
   }
   const saved = saveSystemSettings(updates);
+  appendClaudeConfigAudit(
+    authUser.username,
+    'update_skill_sync_settings',
+    Object.keys(updates).sort(),
+  );
   return c.json({
     autoSyncEnabled: saved.skillAutoSyncEnabled,
     autoSyncIntervalMinutes: saved.skillAutoSyncIntervalMinutes,

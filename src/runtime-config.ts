@@ -3445,6 +3445,147 @@ function parseFloatEnv(envVar: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseBooleanEnv(
+  envVar: string | undefined,
+  fallback: boolean,
+): boolean {
+  if (envVar === undefined) return fallback;
+  const normalized = envVar.trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function pickNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function pickBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
+}
+
+function pickBoundedString(
+  value: unknown,
+  fallback: string,
+  maxLength: number,
+): string {
+  if (typeof value !== 'string') return fallback;
+  const normalized = value.trim();
+  if (!normalized || normalized.length > maxLength) return fallback;
+  return normalized;
+}
+
+function clampSystemSettings(settings: SystemSettings): SystemSettings {
+  const normalized: SystemSettings = {
+    ...settings,
+    billingMode: 'wallet_first',
+  };
+
+  if (normalized.containerTimeout < 60000) normalized.containerTimeout = 60000; // min 1 min
+  if (normalized.containerTimeout > 86400000)
+    normalized.containerTimeout = 86400000; // max 24 hours
+  if (normalized.idleTimeout < 60000) normalized.idleTimeout = 60000;
+  if (normalized.idleTimeout > 86400000) normalized.idleTimeout = 86400000;
+  if (normalized.containerMaxOutputSize < 1048576)
+    normalized.containerMaxOutputSize = 1048576; // min 1MB
+  if (normalized.containerMaxOutputSize > 104857600)
+    normalized.containerMaxOutputSize = 104857600; // max 100MB
+  if (normalized.maxConcurrentContainers < 1)
+    normalized.maxConcurrentContainers = 1;
+  if (normalized.maxConcurrentContainers > 100)
+    normalized.maxConcurrentContainers = 100;
+  if (normalized.maxConcurrentHostProcesses < 1)
+    normalized.maxConcurrentHostProcesses = 1;
+  if (normalized.maxConcurrentHostProcesses > 50)
+    normalized.maxConcurrentHostProcesses = 50;
+  if (normalized.maxLoginAttempts < 1) normalized.maxLoginAttempts = 1;
+  if (normalized.maxLoginAttempts > 100) normalized.maxLoginAttempts = 100;
+  if (normalized.loginLockoutMinutes < 1) normalized.loginLockoutMinutes = 1;
+  if (normalized.loginLockoutMinutes > 1440)
+    normalized.loginLockoutMinutes = 1440; // max 24 hours
+  if (normalized.maxConcurrentScripts < 1) normalized.maxConcurrentScripts = 1;
+  if (normalized.maxConcurrentScripts > 50)
+    normalized.maxConcurrentScripts = 50;
+  if (normalized.scriptTimeout < 5000) normalized.scriptTimeout = 5000; // min 5s
+  if (normalized.scriptTimeout > 600000)
+    normalized.scriptTimeout = 600000; // max 10 min
+  if (normalized.skillAutoSyncIntervalMinutes < 1)
+    normalized.skillAutoSyncIntervalMinutes = 1;
+  if (normalized.skillAutoSyncIntervalMinutes > 1440)
+    normalized.skillAutoSyncIntervalMinutes = 1440; // max 24h
+  if (normalized.billingMinStartBalanceUsd < 0)
+    normalized.billingMinStartBalanceUsd =
+      DEFAULT_SYSTEM_SETTINGS.billingMinStartBalanceUsd;
+  if (normalized.billingMinStartBalanceUsd > 1000000)
+    normalized.billingMinStartBalanceUsd = 1000000;
+  if (normalized.billingCurrencyRate < 0.0001)
+    normalized.billingCurrencyRate = 0.0001;
+  if (normalized.billingCurrencyRate > 1000000)
+    normalized.billingCurrencyRate = 1000000;
+  normalized.billingCurrency = pickBoundedString(
+    normalized.billingCurrency,
+    DEFAULT_SYSTEM_SETTINGS.billingCurrency,
+    10,
+  );
+
+  return normalized;
+}
+
+function normalizeSystemSettings(
+  raw: Partial<Record<keyof SystemSettings, unknown>>,
+  base: SystemSettings = DEFAULT_SYSTEM_SETTINGS,
+): SystemSettings {
+  return clampSystemSettings({
+    containerTimeout: pickNumber(raw.containerTimeout, base.containerTimeout),
+    idleTimeout: pickNumber(raw.idleTimeout, base.idleTimeout),
+    containerMaxOutputSize: pickNumber(
+      raw.containerMaxOutputSize,
+      base.containerMaxOutputSize,
+    ),
+    maxConcurrentContainers: pickNumber(
+      raw.maxConcurrentContainers,
+      base.maxConcurrentContainers,
+    ),
+    maxConcurrentHostProcesses: pickNumber(
+      raw.maxConcurrentHostProcesses,
+      base.maxConcurrentHostProcesses,
+    ),
+    maxLoginAttempts: pickNumber(raw.maxLoginAttempts, base.maxLoginAttempts),
+    loginLockoutMinutes: pickNumber(
+      raw.loginLockoutMinutes,
+      base.loginLockoutMinutes,
+    ),
+    maxConcurrentScripts: pickNumber(
+      raw.maxConcurrentScripts,
+      base.maxConcurrentScripts,
+    ),
+    scriptTimeout: pickNumber(raw.scriptTimeout, base.scriptTimeout),
+    skillAutoSyncEnabled: pickBoolean(
+      raw.skillAutoSyncEnabled,
+      base.skillAutoSyncEnabled,
+    ),
+    skillAutoSyncIntervalMinutes: pickNumber(
+      raw.skillAutoSyncIntervalMinutes,
+      base.skillAutoSyncIntervalMinutes,
+    ),
+    billingEnabled: pickBoolean(raw.billingEnabled, base.billingEnabled),
+    billingMode: 'wallet_first',
+    billingMinStartBalanceUsd: pickNumber(
+      raw.billingMinStartBalanceUsd,
+      base.billingMinStartBalanceUsd,
+    ),
+    billingCurrency: pickBoundedString(
+      raw.billingCurrency,
+      base.billingCurrency,
+      10,
+    ),
+    billingCurrencyRate: pickNumber(
+      raw.billingCurrencyRate,
+      base.billingCurrencyRate,
+    ),
+  });
+}
+
 // In-memory cache: avoid synchronous file I/O on hot paths (stdout data handler, queue capacity check)
 let _settingsCache: SystemSettings | null = null;
 let _settingsMtimeMs = 0;
@@ -3454,79 +3595,11 @@ function readSystemSettingsFromFile(): SystemSettings | null {
   const raw = JSON.parse(
     fs.readFileSync(SYSTEM_SETTINGS_FILE, 'utf-8'),
   ) as Record<string, unknown>;
-  return {
-    containerTimeout:
-      typeof raw.containerTimeout === 'number' && raw.containerTimeout > 0
-        ? raw.containerTimeout
-        : DEFAULT_SYSTEM_SETTINGS.containerTimeout,
-    idleTimeout:
-      typeof raw.idleTimeout === 'number' && raw.idleTimeout > 0
-        ? raw.idleTimeout
-        : DEFAULT_SYSTEM_SETTINGS.idleTimeout,
-    containerMaxOutputSize:
-      typeof raw.containerMaxOutputSize === 'number' &&
-      raw.containerMaxOutputSize > 0
-        ? raw.containerMaxOutputSize
-        : DEFAULT_SYSTEM_SETTINGS.containerMaxOutputSize,
-    maxConcurrentContainers:
-      typeof raw.maxConcurrentContainers === 'number' &&
-      raw.maxConcurrentContainers > 0
-        ? raw.maxConcurrentContainers
-        : DEFAULT_SYSTEM_SETTINGS.maxConcurrentContainers,
-    maxConcurrentHostProcesses:
-      typeof raw.maxConcurrentHostProcesses === 'number' &&
-      raw.maxConcurrentHostProcesses > 0
-        ? raw.maxConcurrentHostProcesses
-        : DEFAULT_SYSTEM_SETTINGS.maxConcurrentHostProcesses,
-    maxLoginAttempts:
-      typeof raw.maxLoginAttempts === 'number' && raw.maxLoginAttempts > 0
-        ? raw.maxLoginAttempts
-        : DEFAULT_SYSTEM_SETTINGS.maxLoginAttempts,
-    loginLockoutMinutes:
-      typeof raw.loginLockoutMinutes === 'number' && raw.loginLockoutMinutes > 0
-        ? raw.loginLockoutMinutes
-        : DEFAULT_SYSTEM_SETTINGS.loginLockoutMinutes,
-    maxConcurrentScripts:
-      typeof raw.maxConcurrentScripts === 'number' &&
-      raw.maxConcurrentScripts > 0
-        ? raw.maxConcurrentScripts
-        : DEFAULT_SYSTEM_SETTINGS.maxConcurrentScripts,
-    scriptTimeout:
-      typeof raw.scriptTimeout === 'number' && raw.scriptTimeout > 0
-        ? raw.scriptTimeout
-        : DEFAULT_SYSTEM_SETTINGS.scriptTimeout,
-    skillAutoSyncEnabled:
-      typeof raw.skillAutoSyncEnabled === 'boolean'
-        ? raw.skillAutoSyncEnabled
-        : DEFAULT_SYSTEM_SETTINGS.skillAutoSyncEnabled,
-    skillAutoSyncIntervalMinutes:
-      typeof raw.skillAutoSyncIntervalMinutes === 'number' &&
-      raw.skillAutoSyncIntervalMinutes >= 1
-        ? raw.skillAutoSyncIntervalMinutes
-        : DEFAULT_SYSTEM_SETTINGS.skillAutoSyncIntervalMinutes,
-    billingEnabled:
-      typeof raw.billingEnabled === 'boolean'
-        ? raw.billingEnabled
-        : DEFAULT_SYSTEM_SETTINGS.billingEnabled,
-    billingMode: 'wallet_first',
-    billingMinStartBalanceUsd:
-      typeof raw.billingMinStartBalanceUsd === 'number' &&
-      raw.billingMinStartBalanceUsd >= 0
-        ? raw.billingMinStartBalanceUsd
-        : DEFAULT_SYSTEM_SETTINGS.billingMinStartBalanceUsd,
-    billingCurrency:
-      typeof raw.billingCurrency === 'string' && raw.billingCurrency
-        ? raw.billingCurrency
-        : DEFAULT_SYSTEM_SETTINGS.billingCurrency,
-    billingCurrencyRate:
-      typeof raw.billingCurrencyRate === 'number' && raw.billingCurrencyRate > 0
-        ? raw.billingCurrencyRate
-        : DEFAULT_SYSTEM_SETTINGS.billingCurrencyRate,
-  };
+  return normalizeSystemSettings(raw);
 }
 
 function buildEnvFallbackSettings(): SystemSettings {
-  return {
+  return normalizeSystemSettings({
     containerTimeout: parseIntEnv(
       process.env.CONTAINER_TIMEOUT,
       DEFAULT_SYSTEM_SETTINGS.containerTimeout,
@@ -3563,16 +3636,18 @@ function buildEnvFallbackSettings(): SystemSettings {
       process.env.SCRIPT_TIMEOUT,
       DEFAULT_SYSTEM_SETTINGS.scriptTimeout,
     ),
-    skillAutoSyncEnabled:
-      process.env.SKILL_AUTO_SYNC_ENABLED === 'true' ||
+    skillAutoSyncEnabled: parseBooleanEnv(
+      process.env.SKILL_AUTO_SYNC_ENABLED,
       DEFAULT_SYSTEM_SETTINGS.skillAutoSyncEnabled,
+    ),
     skillAutoSyncIntervalMinutes: parseIntEnv(
       process.env.SKILL_AUTO_SYNC_INTERVAL_MINUTES,
       DEFAULT_SYSTEM_SETTINGS.skillAutoSyncIntervalMinutes,
     ),
-    billingEnabled:
-      process.env.BILLING_ENABLED === 'true' ||
+    billingEnabled: parseBooleanEnv(
+      process.env.BILLING_ENABLED,
       DEFAULT_SYSTEM_SETTINGS.billingEnabled,
+    ),
     billingMode: 'wallet_first',
     billingMinStartBalanceUsd: parseFloatEnv(
       process.env.BILLING_MIN_START_BALANCE_USD,
@@ -3584,7 +3659,7 @@ function buildEnvFallbackSettings(): SystemSettings {
       process.env.BILLING_CURRENCY_RATE,
       DEFAULT_SYSTEM_SETTINGS.billingCurrencyRate,
     ),
-  };
+  });
 }
 
 export function getSystemSettings(): SystemSettings {
@@ -3593,8 +3668,12 @@ export function getSystemSettings(): SystemSettings {
     try {
       const mtimeMs = fs.statSync(SYSTEM_SETTINGS_FILE).mtimeMs;
       if (mtimeMs === _settingsMtimeMs) return _settingsCache;
-    } catch {
-      return _settingsCache; // file gone or stat failed — cached value is still valid
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return _settingsCache;
+      }
+      _settingsCache = null;
+      _settingsMtimeMs = 0;
     }
   }
 
@@ -3630,42 +3709,10 @@ export function saveSystemSettings(
   partial: Partial<SystemSettings>,
 ): SystemSettings {
   const existing = getSystemSettings();
-  const merged: SystemSettings = { ...existing, ...partial };
-
-  // Range validation
-  if (merged.containerTimeout < 60000) merged.containerTimeout = 60000; // min 1 min
-  if (merged.containerTimeout > 86400000) merged.containerTimeout = 86400000; // max 24 hours
-  if (merged.idleTimeout < 60000) merged.idleTimeout = 60000;
-  if (merged.idleTimeout > 86400000) merged.idleTimeout = 86400000;
-  if (merged.containerMaxOutputSize < 1048576)
-    merged.containerMaxOutputSize = 1048576; // min 1MB
-  if (merged.containerMaxOutputSize > 104857600)
-    merged.containerMaxOutputSize = 104857600; // max 100MB
-  if (merged.maxConcurrentContainers < 1) merged.maxConcurrentContainers = 1;
-  if (merged.maxConcurrentContainers > 100)
-    merged.maxConcurrentContainers = 100;
-  if (merged.maxConcurrentHostProcesses < 1)
-    merged.maxConcurrentHostProcesses = 1;
-  if (merged.maxConcurrentHostProcesses > 50)
-    merged.maxConcurrentHostProcesses = 50;
-  if (merged.maxLoginAttempts < 1) merged.maxLoginAttempts = 1;
-  if (merged.maxLoginAttempts > 100) merged.maxLoginAttempts = 100;
-  if (merged.loginLockoutMinutes < 1) merged.loginLockoutMinutes = 1;
-  if (merged.loginLockoutMinutes > 1440) merged.loginLockoutMinutes = 1440; // max 24 hours
-  if (merged.maxConcurrentScripts < 1) merged.maxConcurrentScripts = 1;
-  if (merged.maxConcurrentScripts > 50) merged.maxConcurrentScripts = 50;
-  if (merged.scriptTimeout < 5000) merged.scriptTimeout = 5000; // min 5s
-  if (merged.scriptTimeout > 600000) merged.scriptTimeout = 600000; // max 10 min
-  if (merged.skillAutoSyncIntervalMinutes < 1)
-    merged.skillAutoSyncIntervalMinutes = 1;
-  if (merged.skillAutoSyncIntervalMinutes > 1440)
-    merged.skillAutoSyncIntervalMinutes = 1440; // max 24h
-  merged.billingMode = 'wallet_first';
-  if (merged.billingMinStartBalanceUsd < 0)
-    merged.billingMinStartBalanceUsd =
-      DEFAULT_SYSTEM_SETTINGS.billingMinStartBalanceUsd;
-  if (merged.billingMinStartBalanceUsd > 1000000)
-    merged.billingMinStartBalanceUsd = 1000000;
+  const merged = normalizeSystemSettings(
+    partial as Partial<Record<keyof SystemSettings, unknown>>,
+    existing,
+  );
 
   fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
   const tmp = `${SYSTEM_SETTINGS_FILE}.tmp`;
