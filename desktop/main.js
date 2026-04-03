@@ -61,13 +61,32 @@ function getDataDir() {
 }
 
 function migrateOldData(newDataDir) {
-  const oldDataDir = path.join(process.resourcesPath, 'app-backend', 'data');
-  if (!fs.existsSync(oldDataDir)) return;
   if (fs.existsSync(path.join(newDataDir, 'db', 'messages.db'))) return;
 
-  console.log(`[Desktop] Migrating data from ${oldDataDir} to ${newDataDir}`);
-  fs.cpSync(oldDataDir, newDataDir, { recursive: true });
-  console.log('[Desktop] Data migration complete');
+  const exeDir = path.dirname(process.execPath);
+  const candidates = [
+    // Previous NSIS install (data bundled inside resources)
+    path.join(process.resourcesPath, 'app-backend', 'data'),
+    // Portable distribution (data/ next to exe)
+    path.join(exeDir, 'data'),
+    // Portable distribution (exe inside subfolder, data/ at parent)
+    path.join(exeDir, '..', 'data'),
+  ];
+
+  for (const source of candidates) {
+    try {
+      const resolved = path.resolve(source);
+      if (resolved === path.resolve(newDataDir)) continue;
+      if (!fs.existsSync(path.join(resolved, 'db', 'messages.db'))) continue;
+
+      console.log(`[Desktop] Migrating data from ${resolved} to ${newDataDir}`);
+      fs.cpSync(resolved, newDataDir, { recursive: true });
+      console.log('[Desktop] Data migration complete');
+      return;
+    } catch (err) {
+      console.warn(`[Desktop] Migration source check failed for ${source}:`, err.message);
+    }
+  }
 }
 
 function startBackend() {
