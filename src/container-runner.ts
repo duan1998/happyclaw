@@ -1428,11 +1428,11 @@ export async function runCodexHostAgent(
   // Fresh session: inject conversation memory so Codex has prior context
   let effectivePrompt = input.prompt;
   if (!input.sessionId) {
-    const memory = readCodexMemory(group.folder);
+    const memory = readCodexMemory(group.folder, input.agentId || undefined);
     if (memory && memory.exchanges.length > 0) {
       effectivePrompt = buildCodexMemoryPrompt(memory, input.prompt);
       logger.info(
-        { group: group.name, exchanges: memory.exchanges.length },
+        { group: group.name, agentId: input.agentId, exchanges: memory.exchanges.length },
         'Injecting Codex conversation memory into fresh session',
       );
     }
@@ -1612,7 +1612,7 @@ export async function runCodexHostAgent(
       // Persist conversation exchange for memory across session expiry
       if (finalText) {
         try {
-          appendCodexMemory(group.folder, input.prompt, finalText);
+          appendCodexMemory(group.folder, input.prompt, finalText, input.agentId || undefined);
         } catch (memErr) {
           logger.warn({ group: group.name, err: memErr }, 'Failed to persist Codex memory');
         }

@@ -1116,12 +1116,10 @@ groupRoutes.post('/:jid/reset-session', authMiddleware, async (c) => {
   }
 
   // 3b. Clear Codex conversation memory (best-effort).
-  if (!agentId) {
-    try {
-      const { clearCodexMemory } = await import('../codex-config.js');
-      clearCodexMemory(group.folder);
-    } catch { /* non-critical */ }
-  }
+  try {
+    const { clearCodexMemory } = await import('../codex-config.js');
+    clearCodexMemory(group.folder, agentId);
+  } catch { /* non-critical */ }
 
   // 4. Insert system divider message into the correct JID (best-effort).
   const targetJid = agentId ? `${jid}#agent:${agentId}` : jid;

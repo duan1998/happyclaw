@@ -226,13 +226,14 @@ interface CodexMemory {
   exchanges: CodexMemoryExchange[];
 }
 
-function getCodexMemoryPath(folder: string): string {
-  return path.join(CODEX_MEMORY_DIR, `${folder}.json`);
+function getCodexMemoryPath(folder: string, agentId?: string): string {
+  const key = agentId ? `${folder}-${agentId}` : folder;
+  return path.join(CODEX_MEMORY_DIR, `${key}.json`);
 }
 
-export function readCodexMemory(folder: string): CodexMemory | null {
+export function readCodexMemory(folder: string, agentId?: string): CodexMemory | null {
   try {
-    const raw = fs.readFileSync(getCodexMemoryPath(folder), 'utf-8');
+    const raw = fs.readFileSync(getCodexMemoryPath(folder, agentId), 'utf-8');
     return JSON.parse(raw);
   } catch {
     return null;
@@ -243,9 +244,10 @@ export function appendCodexMemory(
   folder: string,
   userPrompt: string,
   assistantResponse: string,
+  agentId?: string,
 ): void {
   fs.mkdirSync(CODEX_MEMORY_DIR, { recursive: true });
-  const memory = readCodexMemory(folder) || { exchanges: [] };
+  const memory = readCodexMemory(folder, agentId) || { exchanges: [] };
 
   const truncate = (s: string, max: number) =>
     s.length > max ? s.slice(0, max) + '…' : s;
@@ -269,7 +271,7 @@ export function appendCodexMemory(
     memory.exchanges.shift();
   }
 
-  const filePath = getCodexMemoryPath(folder);
+  const filePath = getCodexMemoryPath(folder, agentId);
   const tmpPath = filePath + '.tmp';
   fs.writeFileSync(tmpPath, JSON.stringify(memory, null, 2));
   fs.renameSync(tmpPath, filePath);
@@ -294,12 +296,23 @@ export function buildCodexMemoryPrompt(
   return lines.join('\n');
 }
 
-export function clearCodexMemory(folder: string): void {
-  try {
-    fs.unlinkSync(getCodexMemoryPath(folder));
-  } catch {
-    /* file may not exist */
+export function clearCodexMemory(folder: string, agentId?: string): void {
+  if (agentId) {
+    try { fs.unlinkSync(getCodexMemoryPath(folder, agentId)); } catch { /* file may not exist */ }
+    return;
   }
+  // No agentId: clear main + all agent memory files for this folder
+  try { fs.unlinkSync(getCodexMemoryPath(folder)); } catch { /* file may not exist */ }
+  try {
+    if (fs.existsSync(CODEX_MEMORY_DIR)) {
+      const prefix = `${folder}-`;
+      for (const f of fs.readdirSync(CODEX_MEMORY_DIR)) {
+        if (f.startsWith(prefix) && f.endsWith('.json')) {
+          try { fs.unlinkSync(path.join(CODEX_MEMORY_DIR, f)); } catch { /* ignore */ }
+        }
+      }
+    }
+  } catch { /* ignore */ }
 }
 
 // --- Session-level auth/config writing (for codex exec subprocess) ---

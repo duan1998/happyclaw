@@ -77,13 +77,13 @@ export async function executeSessionReset(
   deleteSession(folder, agentId);
   if (!agentId) {
     delete deps.sessions[folder];
-
-    // 3b. Clear Codex conversation memory
-    try {
-      const { clearCodexMemory } = await import('./codex-config.js');
-      clearCodexMemory(folder);
-    } catch { /* non-critical */ }
   }
+
+  // 3b. Clear Codex conversation memory
+  try {
+    const { clearCodexMemory } = await import('./codex-config.js');
+    clearCodexMemory(folder, agentId);
+  } catch { /* non-critical */ }
 
   // 4. Insert context_reset divider message into the correct JID
   const dividerMessageId = crypto.randomUUID();
