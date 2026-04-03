@@ -7,8 +7,8 @@ alwaysApply: true
 
 ## Remote 约定
 
-- `origin` = 上游仓库 (riba2534/happyclaw)，当前账号无写权限
-- `fork` = 个人 fork (duan1998/happyclaw)，推送用 `git push fork main`
+- `origin` = 个人 fork (duan1998/happyclaw)，推送用 `git push origin main`
+- `upstream` = 上游仓库 (riba2534/happyclaw)，当前账号无写权限
 
 ## 发布脚本
 
