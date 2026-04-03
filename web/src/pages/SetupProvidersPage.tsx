@@ -150,11 +150,11 @@ export function SetupProvidersPage() {
     let customEnv: Record<string, string> = {};
     if (providerMode === 'third_party') {
       if (!baseUrl.trim()) {
-        setError('第三方渠道必须填写 ANTHROPIC_BASE_URL');
+        setError('第三方渠道必须填写 API Base URL');
         return;
       }
       if (!authToken.trim()) {
-        setError('第三方渠道必须填写 ANTHROPIC_AUTH_TOKEN');
+        setError('第三方渠道必须填写 API Token');
         return;
       }
       const envResult = buildCustomEnv(customEnvRows);
@@ -303,7 +303,7 @@ export function SetupProvidersPage() {
         <section className="bg-card rounded-xl border border-border shadow-sm p-5">
           <div className="flex items-center gap-2 mb-3">
             <KeyRound className="w-4 h-4 text-primary" />
-            <h2 className="text-base font-semibold text-foreground">Claude Code 配置（二选一）</h2>
+            <h2 className="text-base font-semibold text-foreground">AI 模型配置（二选一）</h2>
           </div>
 
           <div className="inline-flex rounded-lg border border-border p-1 bg-muted mb-4">
@@ -482,12 +482,12 @@ export function SetupProvidersPage() {
             <div className="space-y-4">
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Server className="w-4 h-4 text-primary" />
-                第三方渠道会写入系统全局默认环境变量。必填项为 ANTHROPIC_BASE_URL 和 ANTHROPIC_AUTH_TOKEN。
+                第三方渠道会写入系统全局默认环境变量。必填项为 API Base URL 和 API Token。
               </div>
 
               <div className="grid grid-cols-1 gap-3">
                 <div>
-                  <label className="block text-sm font-medium text-foreground mb-1">ANTHROPIC_BASE_URL（必填）</label>
+                  <label className="block text-sm font-medium text-foreground mb-1">API Base URL（必填）</label>
                   <Input
                     type="text"
                     value={baseUrl}
@@ -497,18 +497,18 @@ export function SetupProvidersPage() {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-foreground mb-1">ANTHROPIC_MODEL（可选）</label>
+                  <label className="block text-sm font-medium text-foreground mb-1">默认模型（可选）</label>
                   <Input
                     type="text"
                     value={model}
                     onChange={(e) => setModel(e.target.value)}
-                    placeholder="opus[1m] / opus / sonnet[1m] / sonnet / haiku"
+                    placeholder="如 claude-sonnet-4-6, gpt-5.4, gemini-3-flash-preview"
                     className="font-mono"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-foreground mb-1">ANTHROPIC_AUTH_TOKEN（必填）</label>
+                  <label className="block text-sm font-medium text-foreground mb-1">API Token（必填）</label>
                   <Input
                     type="password"
                     value={authToken}

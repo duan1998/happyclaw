@@ -8,6 +8,7 @@ export interface UnifiedProviderPublic {
   weight: number;
   anthropicBaseUrl: string;
   anthropicModel: string;
+  supportedModels: string[];
   hasAnthropicAuthToken: boolean;
   anthropicAuthTokenMasked: string | null;
   hasAnthropicApiKey: boolean;

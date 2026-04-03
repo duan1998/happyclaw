@@ -249,6 +249,28 @@ function isPortInUse(port) {
   });
 }
 
+function killPortProcess(port) {
+  const { execSync } = require('child_process');
+  try {
+    const output = execSync(
+      `netstat -ano | findstr "LISTENING" | findstr ":${port} "`,
+      { encoding: 'utf-8', windowsHide: true },
+    );
+    const pids = new Set();
+    for (const line of output.trim().split('\n')) {
+      const parts = line.trim().split(/\s+/);
+      const pid = parts[parts.length - 1];
+      if (pid && /^\d+$/.test(pid) && pid !== '0') pids.add(pid);
+    }
+    for (const pid of pids) {
+      try {
+        execSync(`taskkill /F /PID ${pid}`, { windowsHide: true });
+        console.log(`[Desktop] Killed PID ${pid} occupying port ${port}`);
+      } catch {}
+    }
+  } catch {}
+}
+
 // Single instance lock — prevent multiple copies
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -267,18 +289,20 @@ if (!gotLock) {
 
     const alreadyRunning = await isPortInUse(PORT);
     if (alreadyRunning) {
-      console.log(`[Desktop] Port ${PORT} already in use, connecting to existing service`);
-    } else {
-      startBackend();
-      try {
-        await waitForPort(PORT);
-      } catch (err) {
-        dialog.showErrorBox('HappyClaw', `Failed to start backend service: ${err.message}`);
-        isQuitting = true;
-        stopBackend();
-        app.quit();
-        return;
-      }
+      console.log(`[Desktop] Port ${PORT} already in use, killing existing process...`);
+      killPortProcess(PORT);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+
+    startBackend();
+    try {
+      await waitForPort(PORT);
+    } catch (err) {
+      dialog.showErrorBox('HappyClaw', `Failed to start backend service: ${err.message}`);
+      isQuitting = true;
+      stopBackend();
+      app.quit();
+      return;
     }
 
     createWindow();

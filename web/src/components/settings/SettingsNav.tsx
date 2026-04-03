@@ -28,7 +28,7 @@ interface NavItem {
 }
 
 const systemItems: NavItem[] = [
-  { key: 'claude', label: 'Claude 提供商', icon: <ShieldCheck className="w-4 h-4" />, group: 'system' },
+  { key: 'claude', label: 'AI 提供商', icon: <ShieldCheck className="w-4 h-4" />, group: 'system' },
   { key: 'codex', label: 'Codex 提供商', icon: <Bot className="w-4 h-4" />, group: 'system' },
   { key: 'registration', label: '注册管理', icon: <UserPlus className="w-4 h-4" />, group: 'system' },
   { key: 'appearance', label: '全局外观', icon: <Palette className="w-4 h-4" />, group: 'system' },

@@ -9,9 +9,7 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-
-const CLAUDE_MODELS = ['opus[1m]', 'opus', 'sonnet[1m]', 'sonnet', 'haiku'] as const;
-const CODEX_MODELS = ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex'] as const;
+import { useAvailableModels } from '../../hooks/useAvailableModels';
 
 interface NewConversationDialogProps {
   open: boolean;
@@ -25,6 +23,8 @@ export function NewConversationDialog({ open, defaultRuntime, onConfirm, onClose
   const [runtime, setRuntime] = useState<'claude' | 'codex'>(defaultRuntime);
   const [model, setModel] = useState('');
 
+  const availableModels = useAvailableModels(runtime);
+
   useEffect(() => {
     if (open) {
       setName('');
@@ -32,8 +32,6 @@ export function NewConversationDialog({ open, defaultRuntime, onConfirm, onClose
       setModel('');
     }
   }, [open, defaultRuntime]);
-
-  const modelPresets = runtime === 'codex' ? CODEX_MODELS : CLAUDE_MODELS;
 
   const handleConfirm = () => {
     const trimmed = name.trim();
@@ -95,7 +93,7 @@ export function NewConversationDialog({ open, defaultRuntime, onConfirm, onClose
           <div>
             <label className="block text-sm font-medium mb-1.5">模型 <span className="text-muted-foreground font-normal">(留空使用全局默认)</span></label>
             <div className="flex flex-wrap gap-1.5">
-              {modelPresets.map((preset) => (
+              {availableModels.map((preset) => (
                 <button
                   key={preset}
                   type="button"

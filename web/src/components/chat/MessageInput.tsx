@@ -16,6 +16,7 @@ import {
 import { useFileStore } from '../../stores/files';
 import { useChatStore } from '../../stores/chat';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
+import { useAvailableModels } from '../../hooks/useAvailableModels';
 
 interface PendingFile {
   /** Display name: relative path for folder uploads, file name otherwise */
@@ -34,8 +35,6 @@ interface PendingImage {
 /** 单张图片大小上限 5MB */
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 
-const CLAUDE_MODELS = ['opus[1m]', 'opus', 'sonnet[1m]', 'sonnet', 'haiku'] as const;
-const CODEX_MODELS = ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex'] as const;
 
 export interface ModelSelectorInfo {
   agentRuntime: 'claude' | 'codex';
@@ -64,6 +63,7 @@ export function MessageInput({
   const [content, setContent] = useState('');
   const [showActions, setShowActions] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
+  const availableModels = useAvailableModels(modelInfo?.agentRuntime ?? 'claude');
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [sending, setSending] = useState(false);
@@ -703,7 +703,7 @@ export function MessageInput({
                 {showModelMenu && (
                   <div className="absolute bottom-full right-0 mb-1 w-48 rounded-lg border border-border bg-popover shadow-lg overflow-hidden z-50 animate-in fade-in-0 slide-in-from-bottom-2 duration-150">
                     <div className="max-h-60 overflow-y-auto py-1">
-                      {(modelInfo.agentRuntime === 'codex' ? CODEX_MODELS : CLAUDE_MODELS).map((m) => (
+                      {availableModels.map((m) => (
                         <button
                           key={m}
                           onClick={() => { onModelChange(m); setShowModelMenu(false); }}

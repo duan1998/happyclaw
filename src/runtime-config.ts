@@ -314,6 +314,7 @@ interface StoredProviderV4 {
   weight: number;
   anthropicBaseUrl: string;
   anthropicModel: string;
+  supportedModels?: string[];
   secrets: EncryptedSecrets;
   customEnv?: Record<string, string>;
   updatedAt: string;
@@ -336,6 +337,7 @@ export interface UnifiedProvider {
   anthropicBaseUrl: string;
   anthropicAuthToken: string;
   anthropicModel: string;
+  supportedModels: string[];
   anthropicApiKey: string;
   claudeCodeOauthToken: string;
   claudeOAuthCredentials: ClaudeOAuthCredentials | null;
@@ -352,6 +354,7 @@ export interface UnifiedProviderPublic {
   weight: number;
   anthropicBaseUrl: string;
   anthropicModel: string;
+  supportedModels: string[];
   hasAnthropicAuthToken: boolean;
   anthropicAuthTokenMasked: string | null;
   hasAnthropicApiKey: boolean;
@@ -1002,6 +1005,9 @@ function toStoredProviderV4(provider: UnifiedProvider): StoredProviderV4 {
     weight: Math.max(1, Math.min(100, provider.weight || 1)),
     anthropicBaseUrl: provider.anthropicBaseUrl || '',
     anthropicModel: provider.anthropicModel || '',
+    ...(provider.supportedModels?.length
+      ? { supportedModels: provider.supportedModels }
+      : {}),
     secrets: encryptSecrets(secrets),
     ...(Object.keys(sanitizedEnv).length > 0
       ? { customEnv: sanitizedEnv }
@@ -1021,6 +1027,7 @@ function fromStoredProviderV4(stored: StoredProviderV4): UnifiedProvider {
     anthropicBaseUrl: stored.anthropicBaseUrl || '',
     anthropicAuthToken: secrets.anthropicAuthToken || '',
     anthropicModel: stored.anthropicModel || '',
+    supportedModels: stored.supportedModels ?? [],
     anthropicApiKey: secrets.anthropicApiKey || '',
     claudeCodeOauthToken: secrets.claudeCodeOauthToken || '',
     claudeOAuthCredentials: secrets.claudeOAuthCredentials ?? null,
@@ -1054,6 +1061,7 @@ function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
       anthropicBaseUrl: '',
       anthropicAuthToken: '',
       anthropicModel: '',
+      supportedModels: [],
       anthropicApiKey: v3.officialSecrets.anthropicApiKey,
       claudeCodeOauthToken: v3.officialSecrets.claudeCodeOauthToken,
       claudeOAuthCredentials: v3.officialSecrets.claudeOAuthCredentials ?? null,
@@ -1074,6 +1082,7 @@ function migrateV3toV4(v3: ClaudeStoredStateV3Resolved): {
       anthropicBaseUrl: profile.anthropicBaseUrl,
       anthropicAuthToken: profile.anthropicAuthToken,
       anthropicModel: profile.anthropicModel,
+      supportedModels: [],
       anthropicApiKey: '',
       claudeCodeOauthToken: '',
       claudeOAuthCredentials: null,
@@ -1209,6 +1218,16 @@ export function getEnabledProviders(): UnifiedProvider[] {
   return getProviders().filter((p) => p.enabled);
 }
 
+/** Returns the deduplicated union of supportedModels from all enabled providers */
+export function getAvailableModels(): string[] {
+  const providers = getEnabledProviders();
+  const modelSet = new Set<string>();
+  for (const p of providers) {
+    for (const m of p.supportedModels) modelSet.add(m);
+  }
+  return [...modelSet];
+}
+
 export function getBalancingConfig(): BalancingConfig {
   const state = readStoredStateV4();
   return state?.balancing ?? { ...DEFAULT_BALANCING_CONFIG };
@@ -1235,6 +1254,7 @@ export function createProvider(input: {
   anthropicBaseUrl?: string;
   anthropicAuthToken?: string;
   anthropicModel?: string;
+  supportedModels?: string[];
   anthropicApiKey?: string;
   claudeCodeOauthToken?: string;
   claudeOAuthCredentials?: ClaudeOAuthCredentials | null;
@@ -1267,6 +1287,7 @@ export function createProvider(input: {
     anthropicModel: input.anthropicModel
       ? normalizeModel(input.anthropicModel)
       : '',
+    supportedModels: input.supportedModels?.filter((m) => m.trim()).map((m) => m.trim()) ?? [],
     anthropicApiKey: input.anthropicApiKey
       ? normalizeSecret(input.anthropicApiKey, 'anthropicApiKey')
       : '',
@@ -1291,6 +1312,7 @@ export function updateProvider(
     name?: string;
     anthropicBaseUrl?: string;
     anthropicModel?: string;
+    supportedModels?: string[];
     customEnv?: Record<string, string>;
     weight?: number;
   },
@@ -1312,6 +1334,9 @@ export function updateProvider(
       : {}),
     ...(patch.anthropicModel !== undefined
       ? { anthropicModel: normalizeModel(patch.anthropicModel) }
+      : {}),
+    ...(patch.supportedModels !== undefined
+      ? { supportedModels: patch.supportedModels.filter((m) => m.trim()).map((m) => m.trim()) }
       : {}),
     ...(patch.customEnv !== undefined
       ? {
@@ -1466,6 +1491,7 @@ export function toPublicProvider(
     weight: provider.weight,
     anthropicBaseUrl: provider.anthropicBaseUrl,
     anthropicModel: provider.anthropicModel,
+    supportedModels: provider.supportedModels ?? [],
     hasAnthropicAuthToken: !!provider.anthropicAuthToken,
     anthropicAuthTokenMasked: maskSecret(provider.anthropicAuthToken),
     hasAnthropicApiKey: !!provider.anthropicApiKey,

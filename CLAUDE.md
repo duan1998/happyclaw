@@ -22,7 +22,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/routes/auth.ts` | 认证：登录 / 登出 / 注册、`GET /api/auth/me`（含 `setupStatus`）、设置向导、RBAC、邀请码 |
 | `src/routes/groups.ts` | 群组 CRUD、消息分页、会话重置（重建工作区）、群组级容器环境变量 |
 | `src/routes/files.ts` | 文件上传（50MB 限制）/ 下载 / 删除、目录管理、路径遍历防护 |
-| `src/routes/config.ts` | Claude / 飞书配置（AES-256-GCM 加密存储）、连通性测试、批量应用到所有容器、per-user IM 通道配置（`/api/config/user-im/feishu`、`/api/config/user-im/telegram`、`/api/config/user-im/qq`、`/api/config/user-im/dingtalk`） |
+| `src/routes/config.ts` | AI 提供商配置（AES-256-GCM 加密存储，per-provider `supportedModels` 模型声明）、连通性测试、批量应用到所有容器、per-user IM 通道配置（`/api/config/user-im/feishu`、`/api/config/user-im/telegram`、`/api/config/user-im/qq`、`/api/config/user-im/dingtalk`） |
 | `src/routes/monitor.ts` | 系统状态：容器列表、队列状态、健康检查（`GET /api/health` 无需认证） |
 | `src/routes/memory.ts` | 记忆文件读写（`groups/global/` + `groups/{folder}/`）、全文检索 |
 | `src/routes/tasks.ts` | 定时任务 CRUD + 执行日志查询 |
@@ -38,7 +38,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/dingtalk-streaming-card.ts` | 钉钉 AI Card 流式响应控制器（打字机效果） |
 | `src/im-downloader.ts` | IM 文件下载工具：`saveDownloadedFile()` 将 Buffer 写入 `downloads/{channel}/{YYYY-MM-DD}/`，支持 `feishu`/`telegram`/`qq`/`dingtalk` 通道，处理路径安全、文件名冲突和 50MB 限制 |
 | `src/im-manager.ts` | IM 连接池管理器（`IMConnectionManager`）：per-user 飞书/Telegram/QQ/钉钉连接管理、热重连、批量断开 |
-| `src/container-runner.ts` | 容器生命周期：Docker run + 宿主机进程模式、卷挂载构建（isAdminHome 区分权限）、环境变量注入 |
+| `src/container-runner.ts` | 容器生命周期：Docker run + 宿主机进程模式、卷挂载构建（isAdminHome 区分权限）、环境变量注入、模型感知 Provider Pool 路由（按 `supportedModels` 过滤） |
 | `src/agent-output-parser.ts` | Agent 输出解析：OUTPUT_MARKER 流式输出解析、stdout/stderr 处理、进程生命周期回调（从 container-runner.ts 提取的共享逻辑） |
 | `src/group-queue.ts` | 并发控制：最大 20 容器 + 最大 5 宿主机进程、会话级队列、任务优先于消息、指数退避重试 |
 | `src/runtime-config.ts` | 配置存储：AES-256-GCM 加密、分层配置（容器级 > 全局 > 环境变量）、变更审计日志 |
@@ -71,7 +71,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | 层次 | 技术 |
 |------|------|
 | 框架 | React 19 + TypeScript + Vite 6 |
-| 状态 | Zustand 5（10 个 Store：auth、chat、groups、tasks、monitor、container-env、files、users、skills、mcp-servers） |
+| 状态 | Zustand 5（10 个 Store：auth、chat、groups、tasks、monitor、container-env、files、users、skills、mcp-servers）+ `useAvailableModels` hook（`useSyncExternalStore` 缓存 provider 模型并集） |
 | 样式 | Tailwind CSS 4（teal 主色调，`lg:` 断点响应式，移动端优先） |
 | 路由 | React Router 7（AuthGuard + SetupPage 重定向） |
 | 通信 | 统一 API 客户端（8s 超时，FormData 120s）、WebSocket 实时推送 + 指数退避重连 |
@@ -412,9 +412,10 @@ scripts/                      # 构建辅助脚本
 - `GET /api/memory/sources` · `GET /api/memory/search`（全文检索）
 - `GET|PUT /api/memory/file`
 
-### 配置
+### 配置（AI 提供商）
 - `GET|PUT /api/config/claude` · `PUT /api/config/claude/secrets`
 - `GET|PUT /api/config/claude/custom-env`
+- `GET /api/config/claude/available-models`（所有启用提供商的 `supportedModels` 并集，供模型选择器消费）
 - `POST /api/config/claude/test`（连通性测试） · `POST /api/config/claude/apply`（应用到所有容器）
 - `GET|PUT /api/config/feishu`（**deprecated**，使用 `/api/config/user-im/feishu` 代替）
 - `GET|PUT /api/config/telegram` · `POST /api/config/telegram/test`（**deprecated**，使用 `/api/config/user-im/telegram` 代替）

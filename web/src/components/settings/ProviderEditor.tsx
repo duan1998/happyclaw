@@ -17,6 +17,12 @@ import { getErrorMessage } from './types';
 type ProviderType = 'official' | 'third_party';
 type OfficialAuthTab = 'oauth' | 'setup_token' | 'api_key';
 
+const PRESET_MODELS = [
+  { group: 'Claude', models: ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-opus-4-6'] },
+  { group: 'GPT', models: ['gpt-5.4', 'gpt-5.4-mini'] },
+  { group: 'Gemini', models: ['gemini-3-flash-preview', 'gemini-3.1-pro-preview'] },
+];
+
 const RESERVED_ENV_KEYS = new Set([
   'ANTHROPIC_BASE_URL',
   'ANTHROPIC_AUTH_TOKEN',
@@ -99,6 +105,10 @@ export function ProviderEditor({
   const [authTokenDirty, setAuthTokenDirty] = useState(false);
   const [clearTokenOnSave, setClearTokenOnSave] = useState(false);
 
+  // 支持的模型
+  const [supportedModels, setSupportedModels] = useState<string[]>([]);
+  const [customModelInput, setCustomModelInput] = useState('');
+
   // 环境变量
   const [customEnvRows, setCustomEnvRows] = useState<EnvRow[]>([]);
 
@@ -124,6 +134,8 @@ export function ProviderEditor({
       setAuthToken('');
       setAuthTokenDirty(false);
       setClearTokenOnSave(false);
+      setSupportedModels([]);
+      setCustomModelInput('');
       setCustomEnvRows([]);
     } else {
       setProviderType(provider.type);
@@ -140,6 +152,8 @@ export function ProviderEditor({
       setAuthToken('');
       setAuthTokenDirty(false);
       setClearTokenOnSave(false);
+      setSupportedModels(provider.supportedModels ?? []);
+      setCustomModelInput('');
       const envRows = Object.entries(provider.customEnv || {}).map(([key, value]) => ({ key, value }));
       setCustomEnvRows(envRows);
     }
@@ -231,12 +245,12 @@ export function ProviderEditor({
           const trimmedBaseUrl = baseUrl.trim();
           const trimmedToken = authToken.trim();
           if (!trimmedBaseUrl) {
-            setError('请填写 ANTHROPIC_BASE_URL');
+            setError('请填写 API Base URL');
             setSaving(false);
             return;
           }
           if (!trimmedToken) {
-            setError('新建第三方提供商时必须填写 ANTHROPIC_AUTH_TOKEN');
+            setError('新建第三方提供商时必须填写 API Token');
             setSaving(false);
             return;
           }
@@ -289,6 +303,7 @@ export function ProviderEditor({
         }
 
         if (model.trim()) createBody.anthropicModel = model.trim();
+        if (supportedModels.length > 0) createBody.supportedModels = supportedModels;
 
         await api.post('/api/config/claude/providers', createBody);
         setNotice('提供商已创建。');
@@ -306,6 +321,7 @@ export function ProviderEditor({
         if (model.trim()) {
           patchBody.anthropicModel = model.trim();
         }
+        patchBody.supportedModels = supportedModels;
 
         await api.patch(`/api/config/claude/providers/${provider!.id}`, patchBody);
 
@@ -596,7 +612,7 @@ export function ProviderEditor({
           {providerType === 'third_party' && (
             <div className="space-y-4">
               <div>
-                <label className="block text-xs text-muted-foreground mb-1">ANTHROPIC_BASE_URL</label>
+                <label className="block text-xs text-muted-foreground mb-1">API Base URL</label>
                 <Input
                   type="text"
                   value={baseUrl}
@@ -608,7 +624,7 @@ export function ProviderEditor({
 
               <div>
                 <label className="block text-xs text-muted-foreground mb-1">
-                  ANTHROPIC_AUTH_TOKEN{' '}
+                  API Token{' '}
                   {!isCreate && provider?.hasAnthropicAuthToken
                     ? `(${provider.anthropicAuthTokenMasked})`
                     : ''}
@@ -654,7 +670,7 @@ export function ProviderEditor({
           {/* ─── 模型选择 ─── */}
           <div>
             <label className="block text-xs text-muted-foreground mb-1">
-              {providerType === 'official' ? '模型' : 'ANTHROPIC_MODEL'}
+              {providerType === 'official' ? '模型' : '默认模型'}
             </label>
             {providerType === 'official' ? (
               <>
@@ -679,15 +695,111 @@ export function ProviderEditor({
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
                   disabled={saving}
-                  placeholder="第三方 API 的模型名称"
+                  placeholder="如 claude-sonnet-4-6, gpt-5.4, gemini-3-flash-preview"
                   className="font-mono"
                 />
                 <p className="text-xs text-muted-foreground mt-1">
-                  注入为 ANTHROPIC_MODEL 环境变量，值取决于第三方 API 支持的模型。
+                  不指定时由对话级选择覆盖，或使用提供商代理的默认模型。
                 </p>
               </>
             )}
           </div>
+
+          {/* ─── 支持的模型（第三方）─── */}
+          {providerType === 'third_party' && (
+            <div className="border-t border-border pt-4">
+              <label className="block text-xs text-muted-foreground mb-2">
+                支持的模型
+                <span className="ml-1 text-muted-foreground/60">（用于对话级模型选择和智能路由，留空表示支持所有模型）</span>
+              </label>
+              {PRESET_MODELS.map((group) => (
+                <div key={group.group} className="mb-2">
+                  <div className="text-xs text-muted-foreground/70 mb-1">{group.group}</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {group.models.map((m) => {
+                      const active = supportedModels.includes(m);
+                      return (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => {
+                            setSupportedModels((prev) =>
+                              active ? prev.filter((x) => x !== m) : [...prev, m],
+                            );
+                          }}
+                          disabled={saving}
+                          className={`px-2.5 py-1 rounded-md border text-xs font-medium transition-all cursor-pointer ${
+                            active
+                              ? 'border-primary bg-primary/10 text-primary'
+                              : 'border-border text-muted-foreground hover:bg-muted'
+                          }`}
+                        >
+                          {m}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+              {/* custom models not in presets */}
+              {supportedModels.filter((m) => !PRESET_MODELS.some((g) => g.models.includes(m))).length > 0 && (
+                <div className="mb-2">
+                  <div className="text-xs text-muted-foreground/70 mb-1">自定义</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {supportedModels
+                      .filter((m) => !PRESET_MODELS.some((g) => g.models.includes(m)))
+                      .map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setSupportedModels((prev) => prev.filter((x) => x !== m))}
+                          disabled={saving}
+                          className="px-2.5 py-1 rounded-md border border-primary bg-primary/10 text-primary text-xs font-medium transition-all cursor-pointer group"
+                        >
+                          {m}
+                          <X className="inline w-3 h-3 ml-1 opacity-60 group-hover:opacity-100" />
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              )}
+              <div className="flex gap-2 mt-2">
+                <Input
+                  type="text"
+                  value={customModelInput}
+                  onChange={(e) => setCustomModelInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      const v = customModelInput.trim();
+                      if (v && !supportedModels.includes(v)) {
+                        setSupportedModels((prev) => [...prev, v]);
+                        setCustomModelInput('');
+                      }
+                    }
+                  }}
+                  disabled={saving}
+                  placeholder="输入自定义模型名，回车添加"
+                  className="flex-1 px-2.5 py-1.5 text-xs font-mono h-auto"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const v = customModelInput.trim();
+                    if (v && !supportedModels.includes(v)) {
+                      setSupportedModels((prev) => [...prev, v]);
+                      setCustomModelInput('');
+                    }
+                  }}
+                  disabled={saving || !customModelInput.trim()}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs text-primary hover:text-primary/80 border border-border rounded-md cursor-pointer disabled:opacity-50"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  添加
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* ─── 自定义环境变量 ─── */}
           <div className="border-t border-border pt-4">

@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
+import { invalidateAvailableModels } from '../../hooks/useAvailableModels';
 import { api } from '../../api/client';
 import type {
   ProviderWithHealth,
@@ -138,6 +139,7 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
       setTogglingId(provider.id);
       try {
         await api.post(`/api/config/claude/providers/${provider.id}/toggle`);
+        invalidateAvailableModels();
         await loadProviders();
         setNotice(provider.enabled ? `已禁用「${provider.name}」` : `已启用「${provider.name}」`);
       } catch (err) {
@@ -173,6 +175,7 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
 
     try {
       await api.delete(`/api/config/claude/providers/${provider.id}`);
+      invalidateAvailableModels();
       setNotice(`已删除提供商「${provider.name}」`);
       await loadProviders();
     } catch (err) {
@@ -191,6 +194,7 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
           type: 'third_party',
           anthropicBaseUrl: provider.anthropicBaseUrl,
           anthropicModel: provider.anthropicModel,
+          supportedModels: provider.supportedModels,
           customEnv: provider.customEnv,
           enabled: false,
         });
@@ -207,6 +211,7 @@ export function ClaudeProviderSection({ setNotice, setError }: ClaudeProviderSec
   const handleEditorSave = useCallback(() => {
     setEditorOpen(false);
     setEditingProvider(null);
+    invalidateAvailableModels();
     loadProviders();
   }, [loadProviders]);
 

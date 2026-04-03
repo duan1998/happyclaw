@@ -38,6 +38,7 @@ import {
   appendClaudeConfigAudit,
   getProviders,
   getEnabledProviders,
+  getAvailableModels,
   getBalancingConfig,
   saveBalancingConfig,
   createProvider,
@@ -595,6 +596,20 @@ configRoutes.put(
       const message =
         err instanceof Error ? err.message : 'Failed to update balancing';
       return c.json({ error: message }, 400);
+    }
+  },
+);
+
+// ─── GET /claude/available-models — 所有启用供应商的模型并集 ─────
+configRoutes.get(
+  '/claude/available-models',
+  authMiddleware,
+  (c) => {
+    try {
+      return c.json({ models: getAvailableModels() });
+    } catch (err) {
+      logger.error({ err }, 'Failed to get available models');
+      return c.json({ error: 'Failed to get available models' }, 500);
     }
   },
 );

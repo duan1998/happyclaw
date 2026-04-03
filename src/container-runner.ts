@@ -161,6 +161,7 @@ interface ResolvedProvider {
  */
 function trySelectPoolProvider(
   groupFolder: string,
+  requestedModel?: string,
 ): { profileId: string; resolved: ResolvedProvider } | null {
   const override = getContainerEnvConfig(groupFolder);
   const hasOverride = !!(
@@ -171,8 +172,21 @@ function trySelectPoolProvider(
   if (hasOverride) return null;
 
   // Refresh pool state from V4 config
-  const enabledProviders = getEnabledProviders();
+  let enabledProviders = getEnabledProviders();
   if (enabledProviders.length <= 1) return null; // No pool needed for 0-1 providers
+
+  // Filter by model support when a specific model is requested
+  if (requestedModel) {
+    const modelCapable = enabledProviders.filter(
+      (p) => p.supportedModels.length === 0 || p.supportedModels.includes(requestedModel),
+    );
+    if (modelCapable.length > 0) {
+      enabledProviders = modelCapable;
+    } else {
+      logger.warn({ requestedModel, providerCount: enabledProviders.length },
+        'No provider declares support for requested model, falling back to all enabled providers');
+    }
+  }
 
   const balancing = getBalancingConfig();
   providerPool.refreshFromConfig(enabledProviders, balancing);
@@ -469,7 +483,7 @@ export async function runContainerAgent(
   mkdirForContainer(groupDir);
 
   // ─── Provider Pool selection ───
-  const poolResult = trySelectPoolProvider(group.folder);
+  const poolResult = trySelectPoolProvider(group.folder, input.agentModel);
   const selectedProfileId = poolResult?.profileId ?? null;
   const resolvedProvider = poolResult?.resolved;
 
@@ -984,7 +998,7 @@ export async function runHostAgent(
 
   // ─── Provider Pool selection (host mode) ───
   const containerOverride = getContainerEnvConfig(group.folder);
-  const hostPoolResult = trySelectPoolProvider(group.folder);
+  const hostPoolResult = trySelectPoolProvider(group.folder, input.agentModel);
   const hostSelectedProfileId = hostPoolResult?.profileId ?? null;
   const globalConfig = hostPoolResult?.resolved.config ?? getClaudeProviderConfig();
 
