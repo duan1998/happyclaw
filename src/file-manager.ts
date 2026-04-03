@@ -22,6 +22,11 @@ export interface FileEntry {
   isSystem: boolean;
 }
 
+function toUiRelativePath(relativePath: string): string {
+  if (!relativePath) return '';
+  return relativePath.split(path.sep).join('/');
+}
+
 // 常量
 export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 const SYSTEM_PATHS = ['logs', 'CLAUDE.md', '.claude', 'conversations'];
@@ -123,7 +128,7 @@ export function listFiles(
 
   // 目录不存在时返回空列表，不自动创建（避免 GET 请求产生写副作用）
   if (!fs.existsSync(absolutePath)) {
-    return { files: [], currentPath: relativePath };
+    return { files: [], currentPath: toUiRelativePath(relativePath) };
   }
 
   const stat = fs.statSync(absolutePath);
@@ -141,7 +146,7 @@ export function listFiles(
 
     files.push({
       name,
-      path: entryRelativePath,
+      path: toUiRelativePath(entryRelativePath),
       type: stats.isDirectory() ? 'directory' : 'file',
       size: stats.size,
       modifiedAt: stats.mtime.toISOString(),
@@ -159,7 +164,7 @@ export function listFiles(
 
   return {
     files,
-    currentPath: relativePath,
+    currentPath: toUiRelativePath(relativePath),
   };
 }
 

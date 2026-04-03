@@ -19,12 +19,14 @@ import {
   Loader2,
   Eye,
   FileEdit,
+  FileSpreadsheet,
+  Film,
+  Music,
 } from 'lucide-react';
-import { useFileStore, FileEntry, toBase64Url } from '../../stores/files';
+import { useFileStore, FileEntry } from '../../stores/files';
 import { useChatStore } from '../../stores/chat';
 import { useAuthStore } from '../../stores/auth';
 import { api } from '../../api/client';
-import { withBasePath } from '../../utils/url';
 import { downloadFromUrl } from '../../utils/download';
 import { showToast } from '../../utils/toast';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -36,6 +38,15 @@ import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
 import { FileUploadZone } from './FileUploadZone';
 import { MarkdownRenderer } from './MarkdownRenderer';
+import { PdfPreview } from './PdfPreview';
+import { SpreadsheetPreview } from './SpreadsheetPreview';
+import { DocxPreview } from './DocxPreview';
+import { MediaPreview } from './MediaPreview';
+import {
+  buildFileDownloadUrl,
+  buildFilePreviewUrl,
+  getFileExt,
+} from './filePreviewUtils';
 
 interface FilePanelProps {
   groupJid: string;
@@ -45,13 +56,37 @@ interface FilePanelProps {
 // ─── File type constants ─────────────────────────────────────────
 
 const IMAGE_EXTENSIONS = new Set([
-  'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico',
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico',
+]);
+
+const PDF_EXTENSIONS = new Set([
+  'pdf',
+]);
+
+const EXCEL_EXTENSIONS = new Set([
+  'xls', 'xlsx',
+]);
+
+const SPREADSHEET_EXTENSIONS = new Set([
+  ...EXCEL_EXTENSIONS, 'csv',
+]);
+
+const DOCX_EXTENSIONS = new Set([
+  'docx',
+]);
+
+const VIDEO_EXTENSIONS = new Set([
+  'mp4', 'webm', 'mov', 'avi', 'mkv',
+]);
+
+const AUDIO_EXTENSIONS = new Set([
+  'mp3', 'wav', 'ogg', 'm4a', 'flac',
 ]);
 
 const TEXT_EXTENSIONS = new Set([
   'txt', 'md', 'json', 'js', 'ts', 'jsx', 'tsx', 'css', 'html', 'xml',
   'py', 'go', 'rs', 'java', 'c', 'cpp', 'h', 'sh', 'yaml', 'yml',
-  'toml', 'ini', 'conf', 'log', 'csv', 'svg',
+  'toml', 'ini', 'conf', 'log', 'svg',
 ]);
 
 const CODE_EXTENSIONS = new Set([
@@ -70,6 +105,14 @@ function FileIcon({ name }: { name: string }) {
 
   if (IMAGE_EXTENSIONS.has(ext))
     return <Image className="w-4 h-4 text-pink-500" />;
+  if (EXCEL_EXTENSIONS.has(ext) || ext === 'csv')
+    return <FileSpreadsheet className="w-4 h-4 text-emerald-600" />;
+  if (DOCX_EXTENSIONS.has(ext))
+    return <FileText className="w-4 h-4 text-blue-500" />;
+  if (VIDEO_EXTENSIONS.has(ext))
+    return <Film className="w-4 h-4 text-violet-500" />;
+  if (AUDIO_EXTENSIONS.has(ext))
+    return <Music className="w-4 h-4 text-orange-500" />;
   if (ARCHIVE_EXTENSIONS.has(ext))
     return <Package className="w-4 h-4 text-amber-500" />;
   if (ext === 'pdf')
@@ -85,13 +128,17 @@ function FileIcon({ name }: { name: string }) {
   return <File className="w-4 h-4 text-muted-foreground" />;
 }
 
-function getFileExt(name: string): string {
-  return name.split('.').pop()?.toLowerCase() || '';
-}
-
 function isClickableFile(name: string, isSystem: boolean): boolean {
   const ext = getFileExt(name);
-  return IMAGE_EXTENSIONS.has(ext) || (TEXT_EXTENSIONS.has(ext) && !isSystem);
+  return (
+    IMAGE_EXTENSIONS.has(ext)
+    || PDF_EXTENSIONS.has(ext)
+    || SPREADSHEET_EXTENSIONS.has(ext)
+    || DOCX_EXTENSIONS.has(ext)
+    || VIDEO_EXTENSIONS.has(ext)
+    || AUDIO_EXTENSIONS.has(ext)
+    || (TEXT_EXTENSIONS.has(ext) && !isSystem)
+  );
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────
@@ -123,7 +170,7 @@ function ImagePreview({
     return () => window.removeEventListener('keydown', handleEsc);
   }, [onClose]);
 
-  const previewUrl = withBasePath(`/api/groups/${encodeURIComponent(groupJid)}/files/preview/${toBase64Url(file.path)}`);
+  const previewUrl = buildFilePreviewUrl(groupJid, file.path);
 
   return createPortal(
     <div
@@ -495,6 +542,13 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
 
   // Preview / Editor state
   const [previewFile, setPreviewFile] = useState<FileEntry | null>(null);
+  const [pdfFile, setPdfFile] = useState<FileEntry | null>(null);
+  const [sheetFile, setSheetFile] = useState<FileEntry | null>(null);
+  const [docxFile, setDocxFile] = useState<FileEntry | null>(null);
+  const [mediaFile, setMediaFile] = useState<{
+    file: FileEntry;
+    kind: 'video' | 'audio';
+  } | null>(null);
   const [editFile, setEditFile] = useState<FileEntry | null>(null);
   const [mdViewFile, setMdViewFile] = useState<FileEntry | null>(null);
 
@@ -562,6 +616,31 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
       return;
     }
 
+    if (PDF_EXTENSIONS.has(ext)) {
+      setPdfFile(item);
+      return;
+    }
+
+    if (SPREADSHEET_EXTENSIONS.has(ext)) {
+      setSheetFile(item);
+      return;
+    }
+
+    if (DOCX_EXTENSIONS.has(ext)) {
+      setDocxFile(item);
+      return;
+    }
+
+    if (VIDEO_EXTENSIONS.has(ext)) {
+      setMediaFile({ file: item, kind: 'video' });
+      return;
+    }
+
+    if (AUDIO_EXTENSIONS.has(ext)) {
+      setMediaFile({ file: item, kind: 'audio' });
+      return;
+    }
+
     // Markdown 文件（非系统） → Markdown 预览/编辑
     if (ext === 'md' && !item.isSystem) {
       setMdViewFile(item);
@@ -576,8 +655,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
   }, [groupJid, navigateTo]);
 
   const handleDownload = (item: FileEntry) => {
-    const encoded = toBase64Url(item.path);
-    const url = `/api/groups/${encodeURIComponent(groupJid)}/files/download/${encoded}`;
+    const url = buildFileDownloadUrl(groupJid, item.path);
     downloadFromUrl(url, item.name).catch((err) => {
       console.error('Download failed:', err);
       showToast('下载失败', err instanceof Error ? err.message : '文件下载出错，请重试');
@@ -685,7 +763,7 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
             onClick={() => handleNavigate(-1)}
             className="text-primary hover:underline whitespace-nowrap cursor-pointer"
           >
-            根目录
+            工作区根目录
           </button>
           {breadcrumbs.map((crumb, index) => (
             <div key={index} className="flex items-center gap-1">
@@ -775,7 +853,11 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            setEditFile(item);
+                            if (getFileExt(item.name) === 'md') {
+                              setMdViewFile(item);
+                            } else {
+                              setEditFile(item);
+                            }
                           }}
                           className="p-2.5 rounded hover:bg-brand-100 text-muted-foreground hover:text-primary transition-colors cursor-pointer"
                           title="编辑"
@@ -894,6 +976,43 @@ export function FilePanel({ groupJid, onClose }: FilePanelProps) {
           groupJid={groupJid}
           file={previewFile}
           onClose={() => setPreviewFile(null)}
+        />
+      )}
+
+      {/* PDF Preview Overlay */}
+      {pdfFile && (
+        <PdfPreview
+          groupJid={groupJid}
+          file={pdfFile}
+          onClose={() => setPdfFile(null)}
+        />
+      )}
+
+      {/* Spreadsheet Preview Overlay */}
+      {sheetFile && (
+        <SpreadsheetPreview
+          groupJid={groupJid}
+          file={sheetFile}
+          onClose={() => setSheetFile(null)}
+        />
+      )}
+
+      {/* Word Preview Overlay */}
+      {docxFile && (
+        <DocxPreview
+          groupJid={groupJid}
+          file={docxFile}
+          onClose={() => setDocxFile(null)}
+        />
+      )}
+
+      {/* Media Preview Overlay */}
+      {mediaFile && (
+        <MediaPreview
+          groupJid={groupJid}
+          file={mediaFile.file}
+          kind={mediaFile.kind}
+          onClose={() => setMediaFile(null)}
         />
       )}
 
