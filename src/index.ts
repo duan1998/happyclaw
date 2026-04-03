@@ -74,6 +74,7 @@ import {
   updateAgentStatus,
   updateAgentLastImJid,
   updateAgentInfo,
+  updateAgentModel,
   deleteCompletedAgents,
   getRunningTaskAgentsByChat,
   markRunningTaskAgentsAsError,
@@ -120,6 +121,7 @@ import {
   getUserWeChatConfig,
   getUserDingTalkConfig,
   getSystemSettings,
+  getAvailableModels,
   saveUserFeishuConfig,
   saveUserTelegramConfig,
   updateAllSessionCredentials,
@@ -188,6 +190,14 @@ const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const execFileAsync = promisify(execFile);
 const DEFAULT_MAIN_JID = 'web:main';
 const DEFAULT_MAIN_NAME = 'Main';
+const FALLBACK_CLAUDE_MODELS = [
+  'opus[1m]',
+  'opus',
+  'sonnet[1m]',
+  'sonnet',
+  'haiku',
+];
+const CODEX_MODELS = ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex'];
 const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_-]+$/;
 const OOM_EXIT_RE = /code 137/;
 
@@ -1001,6 +1011,12 @@ async function handleCommand(
   const rawArgs = command.slice(parts[0].length).trim();
 
   switch (cmd) {
+    case 'help':
+    case 'h':
+      return handleHelpCommand(chatJid);
+    case 'stop':
+    case 'interrupt':
+      return handleStopCommand(chatJid);
     case 'clear':
       return handleClearCommand(chatJid);
     case 'list':
@@ -1013,6 +1029,8 @@ async function handleCommand(
       return handleRecallCommand(chatJid);
     case 'where':
       return handleWhereCommand(chatJid);
+    case 'model':
+      return handleModelCommand(chatJid, rawArgs);
     case 'unbind':
       return handleUnbindCommand(chatJid);
     case 'bind':
@@ -1067,6 +1085,60 @@ async function handleClearCommand(chatJid: string): Promise<string> {
     );
     return '清除上下文失败，请稍后重试';
   }
+}
+
+function handleStopCommand(chatJid: string): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '未找到当前工作区';
+
+  const target = resolveBoundChatTarget(
+    chatJid,
+    group,
+    (jid) => registeredGroups[jid] ?? getRegisteredGroup(jid),
+    getAgent,
+    findGroupNameByFolder,
+  );
+
+  const interrupted = queue.interruptQuery(target.targetChatJid);
+  if (!interrupted) {
+    return `当前绑定会话没有正在运行的任务：${target.locationLine}`;
+  }
+
+  const session = getStreamingSession(target.targetChatJid);
+  if (session?.isActive()) {
+    session.abort('已中断').catch(() => {});
+  }
+
+  const messageId = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+  try {
+    ensureChatExists(target.targetChatJid);
+    storeMessageDirect(
+      messageId,
+      target.targetChatJid,
+      '__system__',
+      'system',
+      'query_interrupted',
+      timestamp,
+      true,
+    );
+    broadcastNewMessage(target.targetChatJid, {
+      id: messageId,
+      chat_jid: target.targetChatJid,
+      sender: '__system__',
+      sender_name: 'system',
+      content: 'query_interrupted',
+      timestamp,
+      is_from_me: true,
+    });
+  } catch (err) {
+    logger.warn(
+      { chatJid, targetChatJid: target.targetChatJid, err },
+      'Interrupt succeeded but failed to append system marker',
+    );
+  }
+
+  return `已中断当前绑定会话：${target.locationLine}`;
 }
 
 /**
@@ -1241,6 +1313,13 @@ function handleStatusCommand(chatJid: string): string {
     getAgent,
     findGroupNameByFolder,
   );
+  const target = resolveBoundChatTarget(
+    chatJid,
+    group,
+    lookupGroup,
+    getAgent,
+    findGroupNameByFolder,
+  );
 
   const queueStatus = queue.getStatus();
   const settings = getSystemSettings();
@@ -1256,6 +1335,32 @@ function handleStatusCommand(chatJid: string): string {
       ? queueStatus.waitingGroupJids.indexOf(chatJid) + 1
       : null;
 
+  const waitingFolders = queueStatus.waitingGroupJids.map((jid) => {
+    const waitingGroup = lookupGroup(jid);
+    return waitingGroup?.folder ?? null;
+  });
+  const targetQueuePosition =
+    !isActive && waitingFolders.includes(location.folder)
+      ? waitingFolders.indexOf(location.folder) + 1
+      : queuePosition;
+
+  let runtime: 'claude' | 'codex' | undefined;
+  let currentModel: string | undefined;
+  if (target.agentId) {
+    const agent = getAgent(target.agentId);
+    if (agent) {
+      runtime = agent.agent_runtime === 'codex' ? 'codex' : 'claude';
+      currentModel = agent.agent_model || undefined;
+    }
+  } else {
+    const targetGroup =
+      registeredGroups[target.baseChatJid] ?? getRegisteredGroup(target.baseChatJid);
+    if (targetGroup) {
+      runtime = targetGroup.default_runtime === 'codex' ? 'codex' : 'claude';
+      currentModel = targetGroup.default_model || undefined;
+    }
+  }
+
   return formatSystemStatus(
     location,
     {
@@ -1267,8 +1372,170 @@ function handleStatusCommand(chatJid: string): string {
       waitingGroupJids: queueStatus.waitingGroupJids,
     },
     isActive,
-    queuePosition,
+    targetQueuePosition,
+    runtime,
+    currentModel,
+    group.require_mention !== false,
   );
+}
+
+function getAvailableModelsForRuntime(
+  runtime: 'claude' | 'codex',
+): string[] {
+  if (runtime === 'codex') return CODEX_MODELS;
+  const configured = getAvailableModels();
+  return configured.length > 0 ? configured : FALLBACK_CLAUDE_MODELS;
+}
+
+function normalizeModelToken(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function extractModelParts(value: string): string[] {
+  return value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+
+function buildModelSearchKeys(value: string): string[] {
+  const keys = new Set<string>();
+  const lower = value.toLowerCase().trim();
+  const normalized = normalizeModelToken(value);
+  const parts = extractModelParts(value);
+  const providerWords = new Set(['claude', 'gpt', 'gemini', 'preview']);
+
+  if (lower) keys.add(lower);
+  if (normalized) keys.add(normalized);
+  if (parts.length > 0) keys.add(parts.join(''));
+
+  const meaningfulParts = parts.filter((part) => !providerWords.has(part));
+  if (meaningfulParts.length > 0) {
+    keys.add(meaningfulParts.join(''));
+  }
+
+  const numberParts = meaningfulParts.filter((part) => /^\d+$/.test(part));
+  const wordParts = meaningfulParts.filter((part) => !/^\d+$/.test(part));
+  const joinedNumbers = numberParts.join('');
+
+  if (joinedNumbers) {
+    keys.add(joinedNumbers);
+    for (const word of wordParts) {
+      keys.add(`${word}${joinedNumbers}`);
+      keys.add(`${joinedNumbers}${word}`);
+    }
+  }
+
+  for (const part of meaningfulParts) {
+    keys.add(part);
+  }
+
+  return [...keys].filter(Boolean);
+}
+
+function filterModelInputKeys(keys: string[]): string[] {
+  return keys.filter((key) => {
+    if (!key) return false;
+    if (/^\d+$/.test(key)) return key.length >= 2;
+    return key.length >= 3;
+  });
+}
+
+function resolveModelSelection(
+  input: string,
+  availableModels: string[],
+): { match?: string; ambiguous?: string[] } {
+  const trimmed = input.trim();
+  if (!trimmed) return {};
+
+  const lower = trimmed.toLowerCase();
+  const inputKeys = filterModelInputKeys(buildModelSearchKeys(trimmed));
+
+  const exact = availableModels.find((model) => model.toLowerCase() === lower);
+  if (exact) return { match: exact };
+
+  const exactKeyMatches = availableModels.filter((model) => {
+    const modelKeys = buildModelSearchKeys(model);
+    return inputKeys.some((key) => modelKeys.includes(key));
+  });
+  if (exactKeyMatches.length === 1) return { match: exactKeyMatches[0] };
+  if (exactKeyMatches.length > 1) return { ambiguous: exactKeyMatches };
+
+  const prefixMatches = availableModels.filter((model) => {
+    const modelKeys = buildModelSearchKeys(model);
+    return inputKeys.some((key) =>
+      modelKeys.some((modelKey) => modelKey.startsWith(key)),
+    );
+  });
+  if (prefixMatches.length === 1) return { match: prefixMatches[0] };
+  if (prefixMatches.length > 1) return { ambiguous: prefixMatches };
+
+  const includesMatches = availableModels.filter((model) => {
+    const modelKeys = buildModelSearchKeys(model);
+    return inputKeys.some((key) =>
+      modelKeys.some((modelKey) => modelKey.includes(key)),
+    );
+  });
+  if (includesMatches.length === 1) return { match: includesMatches[0] };
+  if (includesMatches.length > 1) return { ambiguous: includesMatches };
+
+  return {};
+}
+
+function formatModelCommandHelp(
+  runtime: 'claude' | 'codex',
+  currentModel?: string,
+  locationLine?: string,
+): string {
+  const models = getAvailableModelsForRuntime(runtime);
+  const lines = ['🤖 模型设置'];
+  if (locationLine) lines.push(`📍 当前绑定: ${locationLine}`);
+  lines.push(`⚙️ Runtime: ${runtime}`);
+  lines.push(`🧠 当前模型: ${currentModel || '默认'}`);
+  lines.push('');
+  lines.push('可用模型:');
+  lines.push(...models.map((model) => `- ${model}`));
+  lines.push('');
+  lines.push('用法: /model <模型名>');
+  lines.push('清除显式设置: /model default');
+  return lines.join('\n');
+}
+
+function handleHelpCommand(chatJid: string): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  const lines = ['📚 可用命令'];
+
+  if (group) {
+    const lookupGroup = (jid: string) =>
+      registeredGroups[jid] ?? getRegisteredGroup(jid);
+    const location = resolveLocationInfo(
+      group,
+      lookupGroup,
+      getAgent,
+      findGroupNameByFolder,
+    );
+    lines.push(`📍 当前绑定: ${location.locationLine}`);
+    lines.push('');
+  } else {
+    lines.push('');
+  }
+
+  lines.push('/help 或 /h - 查看本帮助');
+  lines.push('/stop 或 /interrupt - 中断当前绑定会话');
+  lines.push('/model - 查看当前模型和可选模型');
+  lines.push('/model <模型名> - 切换当前绑定会话模型');
+  lines.push('/model default - 恢复默认模型');
+  lines.push('/list 或 /ls - 查看工作区和会话列表');
+  lines.push('/where - 查看当前绑定位置');
+  lines.push('/bind <工作区> - 绑定到工作区主对话');
+  lines.push('/bind <工作区>/<agent短ID> - 绑定到指定会话');
+  lines.push('/unbind - 解绑回当前聊天默认工作区');
+  lines.push('/new <名称> - 新建工作区并绑定当前聊天');
+  lines.push('/status - 查看当前绑定会话状态');
+  lines.push('/clear - 清除当前绑定会话上下文');
+  lines.push('/recall 或 /rc - 总结最近消息');
+  lines.push('/require_mention - 查看是否必须 @机器人');
+  lines.push('/require_mention true - 仅 @机器人 时响应');
+  lines.push('/require_mention false - 群内所有消息都响应');
+  lines.push('/sw <消息> 或 /spawn <消息> - 并行开一个子任务');
+  return lines.join('\n');
 }
 
 function handleWhereCommand(chatJid: string): string {
@@ -1283,12 +1550,166 @@ function handleWhereCommand(chatJid: string): string {
     getAgent,
     findGroupNameByFolder,
   );
+  const target = resolveBoundChatTarget(
+    chatJid,
+    group,
+    lookupGroup,
+    getAgent,
+    findGroupNameByFolder,
+  );
 
   const lines = [`📍 当前绑定: ${location.locationLine}`];
+  if (target.agentId) {
+    const agent = getAgent(target.agentId);
+    if (agent) {
+      const runtime = agent.agent_runtime === 'codex' ? 'codex' : 'claude';
+      lines.push(`⚙️ Runtime: ${runtime}`);
+      lines.push(`🧠 当前模型: ${agent.agent_model || '默认'}`);
+    }
+  } else {
+    const targetGroup =
+      registeredGroups[target.baseChatJid] ?? getRegisteredGroup(target.baseChatJid);
+    if (targetGroup) {
+      const runtime =
+        targetGroup.default_runtime === 'codex' ? 'codex' : 'claude';
+      lines.push(`⚙️ Runtime: ${runtime}`);
+      lines.push(`🧠 当前模型: ${targetGroup.default_model || '默认'}`);
+    }
+  }
+
+  lines.push(
+    `@响应模式: ${group.require_mention !== false ? '需要 @机器人' : '全量响应'}`,
+  );
   if (location.replyPolicy) {
     lines.push(`🔁 回复策略: ${location.replyPolicy}`);
   }
   return lines.join('\n');
+}
+
+function handleModelCommand(chatJid: string, rawArgs: string): string {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return '当前 IM 未绑定工作区';
+
+  const target = resolveBoundChatTarget(
+    chatJid,
+    group,
+    (jid) => registeredGroups[jid] ?? getRegisteredGroup(jid),
+    getAgent,
+    findGroupNameByFolder,
+  );
+  const normalizedArg = rawArgs.trim();
+  const normalizedArgLower = normalizedArg.toLowerCase();
+
+  if (target.agentId) {
+    const agent = getAgent(target.agentId);
+    if (!agent) return '当前绑定的会话不存在';
+    const runtime = agent.agent_runtime === 'codex' ? 'codex' : 'claude';
+    const currentModel = agent.agent_model || undefined;
+
+    if (!normalizedArg) {
+      return formatModelCommandHelp(runtime, currentModel, target.locationLine);
+    }
+
+    const shouldClear =
+      normalizedArgLower === 'default' ||
+      normalizedArgLower === 'clear' ||
+      normalizedArgLower === 'reset' ||
+      normalizedArg === '默认';
+    const availableModels = getAvailableModelsForRuntime(runtime);
+    const selection = resolveModelSelection(normalizedArg, availableModels);
+    const nextModel = shouldClear ? null : selection.match ?? normalizedArg;
+
+    if (selection.ambiguous && selection.ambiguous.length > 0) {
+      return [
+        `模型 "${normalizedArg}" 匹配到多个候选，请说更具体一点：`,
+        ...selection.ambiguous.map((model) => `- ${model}`),
+      ].join('\n');
+    }
+
+    if (
+      nextModel &&
+      !availableModels.includes(nextModel)
+    ) {
+      return (
+        `模型 "${nextModel}" 不在当前 ${runtime} 可用列表中。\n\n` +
+        formatModelCommandHelp(runtime, currentModel, target.locationLine)
+      );
+    }
+
+    if ((currentModel ?? null) === nextModel) {
+      return `当前绑定会话已在使用模型: ${currentModel || '默认'}`;
+    }
+
+    updateAgentModel(target.agentId, undefined, nextModel);
+    deleteSession(target.folder, target.agentId);
+
+    const updatedAgent = getAgent(target.agentId) ?? agent;
+    broadcastAgentStatus(
+      target.baseChatJid,
+      target.agentId,
+      updatedAgent.status,
+      updatedAgent.name,
+      updatedAgent.prompt,
+      undefined,
+      undefined,
+      true,
+    );
+
+    return shouldClear
+      ? `已清除 ${target.locationLine} 的显式模型设置，后续将使用默认模型。`
+      : `已将 ${target.locationLine} 的模型切换为 ${nextModel}。`;
+  }
+
+  const targetGroup =
+    registeredGroups[target.baseChatJid] ?? getRegisteredGroup(target.baseChatJid);
+  if (!targetGroup) return '当前绑定的工作区不存在';
+  const runtime = targetGroup.default_runtime === 'codex' ? 'codex' : 'claude';
+  const currentModel = targetGroup.default_model || undefined;
+
+  if (!normalizedArg) {
+    return formatModelCommandHelp(runtime, currentModel, target.locationLine);
+  }
+
+  const shouldClear =
+    normalizedArgLower === 'default' ||
+    normalizedArgLower === 'clear' ||
+    normalizedArgLower === 'reset' ||
+    normalizedArg === '默认';
+  const availableModels = getAvailableModelsForRuntime(runtime);
+  const selection = resolveModelSelection(normalizedArg, availableModels);
+  const nextModel = shouldClear ? undefined : selection.match ?? normalizedArg;
+
+  if (selection.ambiguous && selection.ambiguous.length > 0) {
+    return [
+      `模型 "${normalizedArg}" 匹配到多个候选，请说更具体一点：`,
+      ...selection.ambiguous.map((model) => `- ${model}`),
+    ].join('\n');
+  }
+
+  if (
+    nextModel &&
+    !availableModels.includes(nextModel)
+  ) {
+    return (
+      `模型 "${nextModel}" 不在当前 ${runtime} 可用列表中。\n\n` +
+      formatModelCommandHelp(runtime, currentModel, target.locationLine)
+    );
+  }
+
+  if (currentModel === nextModel) {
+    return `当前绑定会话已在使用模型: ${currentModel || '默认'}`;
+  }
+
+  const updatedGroup: RegisteredGroup = {
+    ...targetGroup,
+    default_model: nextModel,
+  };
+  setRegisteredGroup(target.baseChatJid, updatedGroup);
+  registeredGroups[target.baseChatJid] = updatedGroup;
+
+  return shouldClear
+    ? `已清除 ${target.locationLine} 的显式模型设置，后续将使用默认模型。`
+    : `已将 ${target.locationLine} 的模型切换为 ${nextModel}。`;
 }
 
 function handleUnbindCommand(chatJid: string): string {
@@ -6359,9 +6780,11 @@ function buildTelegramBotAddedHandler(
     onNewChat(chatJid, chatName);
     const welcome =
       `已加入「${chatName}」！当前绑定到默认工作区。\n\n` +
+      `/help — 查看全部命令\n` +
       `/new <名称> — 新建工作区并绑定此群\n` +
       `/bind <工作区> — 绑定到已有工作区\n` +
-      `/list — 查看所有工作区\n\n` +
+      `/list — 查看所有工作区\n` +
+      `/model <模型> — 切当前绑定会话模型\n\n` +
       `也可以直接发消息，我会在默认工作区回复。`;
     imManager
       .sendMessage(chatJid, welcome)
@@ -6564,7 +6987,7 @@ function shouldProcessGroupMessage(chatJid: string): boolean {
       return false; // 忽略所有消息（在调用方处理 disabled 的 DM 忽略）
     case 'auto':
     default:
-      // 兼容旧行为：require_mention defaults to false; if true → only process @mentions
+      // 默认 require_mention=true；只有显式设为 false 时才放行非 @ 消息
       return group.require_mention !== true;
   }
 }

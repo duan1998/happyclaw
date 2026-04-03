@@ -87,7 +87,7 @@ export function formatWorkspaceList(
   }
 
   lines.push('');
-  lines.push('💡 /sw <消息> 并行任务 · /recall 总结 · /clear 重置');
+  lines.push('💡 /model <模型> 切模型 · /stop 中断 · /clear 重置');
   return lines.join('\n');
 }
 
@@ -224,6 +224,9 @@ export function formatSystemStatus(
   queueStatus: QueueStatusInfo,
   isActive: boolean,
   queuePosition: number | null,
+  runtime?: 'claude' | 'codex',
+  currentModel?: string,
+  requireMention?: boolean,
 ): string {
   const statusText = isActive
     ? '运行中'
@@ -235,10 +238,15 @@ export function formatSystemStatus(
     '📊 系统状态',
     '━━━━━━━━━━',
     `📍 位置: ${location.locationLine}`,
+    ...(runtime ? [`⚙️ Runtime: ${runtime}`] : []),
+    ...(runtime ? [`🧠 当前模型: ${currentModel || '默认'}`] : []),
+    ...(requireMention !== undefined
+      ? [`@响应模式: ${requireMention ? '需要 @机器人' : '全量响应'}`]
+      : []),
     `⚡ 状态: ${statusText}`,
     `📦 负载: ${queueStatus.activeContainerCount}/${queueStatus.maxContainers} 容器, ${queueStatus.activeHostProcessCount}/${queueStatus.maxHostProcesses} 进程`,
     '',
-    '💡 /sw <消息> 并行任务 · /where 绑定 · /list 全部',
+    '💡 /model <模型> 切模型 · /stop 中断 · /where 绑定',
   ];
 
   return lines.join('\n');
