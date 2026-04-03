@@ -39,6 +39,7 @@ import { isApiError } from './agent-output-parser.js';
 import type { ClaudeProviderConfig } from './runtime-config.js';
 import { loadUserMcpServers } from './mcp-utils.js';
 import { MessageSourceKind, RegisteredGroup, StreamEvent } from './types.js';
+import { loadAgentDefinitionFiles } from './agent-definition-utils.js';
 import {
   attachStderrHandler,
   attachStdoutHandler,
@@ -450,6 +451,16 @@ function buildVolumeMounts(
     }
   }
 
+  // Always mount the host agent definitions directory so newly created files
+  // are visible to already-running containers without waiting for a rebuild.
+  const hostAgentsDir = path.join(os.homedir(), '.claude', 'agents');
+  fs.mkdirSync(hostAgentsDir, { recursive: true });
+  mounts.push({
+    hostPath: hostAgentsDir,
+    containerPath: '/home/node/.claude/agents',
+    readonly: true,
+  });
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
@@ -528,6 +539,7 @@ export async function runContainerAgent(
         if (input.agentModel) {
           containerArgs.splice(imageIdx, 0, '-e', `ANTHROPIC_MODEL=${input.agentModel}`);
         }
+        containerArgs.splice(imageIdx, 0, '-e', 'CLAUDE_CONFIG_DIR=/home/node/.claude');
         // Pass debug log path (mounted at /workspace/debug.log)
         const updatedIdx = containerArgs.indexOf(CONTAINER_IMAGE);
         containerArgs.splice(updatedIdx, 0, '-e', 'HAPPYCLAW_DEBUG_LOG=/workspace/debug.log');
@@ -926,6 +938,35 @@ export async function runHostAgent(
   const hostMcpServers = group.created_by ? loadUserMcpServers(group.created_by) : {};
   ensureSettingsJson(settingsFile, hostMcpServers);
 
+  // 3.5 将全局自定义 agents 暴露到当前会话目录。
+  // agent-runner 在宿主机模式下会从 CLAUDE_CONFIG_DIR/agents 读取定义，
+  // 这里用链接把 ~/.claude/agents 接到 session 目录里，确保主 agent 可见。
+  try {
+    const hostAgentsDir = path.join(os.homedir(), '.claude', 'agents');
+    fs.mkdirSync(hostAgentsDir, { recursive: true });
+    const sessionAgentsDir = path.join(groupSessionsDir, 'agents');
+
+    try {
+      const stat = fs.lstatSync(sessionAgentsDir);
+      if (stat.isSymbolicLink() || stat.isDirectory()) {
+        fs.rmSync(sessionAgentsDir, { recursive: true, force: true });
+      }
+    } catch {
+      /* ignore if not exists */
+    }
+
+    fs.symlinkSync(
+      hostAgentsDir,
+      sessionAgentsDir,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+  } catch (err) {
+    logger.warn(
+      { folder: group.folder, err },
+      '宿主机模式 agents 链接失败',
+    );
+  }
+
   // 4. Skills 自动链接到 session 目录
   // 链接顺序：项目级 → 用户级(覆盖同名项目级)
   // 用户的所有 skills 在所有工作区中生效
@@ -1302,6 +1343,78 @@ interface ResolvedCodex {
   args: string[];
 }
 
+interface AgentPromptSummary {
+  id: string;
+  description: string;
+  prompt: string;
+}
+
+const BUILTIN_CLAUDE_AGENT_SUMMARIES: AgentPromptSummary[] = [
+  {
+    id: 'code-reviewer',
+    description:
+      'Code review agent that analyzes code quality, best practices, and potential issues',
+    prompt:
+      'You are a strict code reviewer. Focus on correctness, security, performance, and maintainability. ' +
+      'Point out specific issues with file:line references. Be concise and actionable.',
+  },
+  {
+    id: 'web-researcher',
+    description:
+      'Web research agent that searches and extracts information from web pages',
+    prompt:
+      'You are an efficient web researcher. Search for information, extract key facts, and summarize findings. ' +
+      'Always cite sources with URLs. Prefer authoritative sources.',
+  },
+];
+
+function summarizePrompt(prompt: string, maxLength = 220): string {
+  const compact = prompt.replace(/\s+/g, ' ').trim();
+  if (!compact) return '';
+  return compact.length > maxLength
+    ? `${compact.slice(0, maxLength).trim()}...`
+    : compact;
+}
+
+function buildCodexAgentContextBlock(): string {
+  const userAgents = loadAgentDefinitionFiles()
+    .filter((agent) => agent.promptBody)
+    .map<AgentPromptSummary>((agent) => ({
+      id: agent.id,
+      description: agent.description || agent.name || agent.id,
+      prompt: agent.promptBody,
+    }));
+
+  const merged = new Map<string, AgentPromptSummary>();
+  for (const agent of BUILTIN_CLAUDE_AGENT_SUMMARIES) {
+    merged.set(agent.id, agent);
+  }
+  for (const agent of userAgents) {
+    merged.set(agent.id, agent);
+  }
+
+  if (merged.size === 0) return '';
+
+  const lines = [
+    '[CONTEXT: Specialist agent roles are available in this environment.]',
+    'When a task clearly matches one of these roles, you may split work into sub-agents and align each sub-agent with the matching role guidance below.',
+    'Treat these as reusable specialist profiles.',
+    'These role descriptions are intent-level guidance, not a guarantee of identical tool availability in this Codex run.',
+    '',
+  ];
+
+  for (const agent of merged.values()) {
+    const promptSummary = summarizePrompt(agent.prompt);
+    lines.push(`- ${agent.id}: ${agent.description || agent.id}`);
+    if (promptSummary) {
+      lines.push(`  Guidance: ${promptSummary}`);
+    }
+  }
+
+  lines.push('', '[END CONTEXT]');
+  return lines.join('\n');
+}
+
 function resolveCodexOnWindows(cmd: string): ResolvedCodex {
   const fallback: ResolvedCodex = { command: cmd, args: [] };
   if (process.platform !== 'win32' || path.isAbsolute(cmd)) return fallback;
@@ -1414,6 +1527,10 @@ export async function runCodexHostAgent(
         'Injecting Codex conversation memory into fresh session',
       );
     }
+  }
+  const codexAgentContext = buildCodexAgentContextBlock();
+  if (codexAgentContext) {
+    effectivePrompt = `${codexAgentContext}\n\n${effectivePrompt}`;
   }
 
   args.push(effectivePrompt);

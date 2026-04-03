@@ -4,10 +4,14 @@
 import { Hono } from 'hono';
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import type { Variables } from '../web-context.js';
 import { authMiddleware, systemConfigMiddleware } from '../middleware/auth.js';
-import { logger } from '../logger.js';
+import {
+  extractTools,
+  getClaudeAgentsDir,
+  loadAgentDefinitionFiles,
+  parseFrontmatter,
+} from '../agent-definition-utils.js';
 
 const agentDefinitionsRoutes = new Hono<{ Variables: Variables }>();
 
@@ -27,132 +31,28 @@ interface AgentDefinitionDetail extends AgentDefinition {
 
 // --- Utility Functions ---
 
-function getAgentsDir(): string {
-  return path.join(os.homedir(), '.claude', 'agents');
-}
-
 function validateAgentId(id: string): boolean {
   return /^[\w\-]+$/.test(id);
 }
 
-function extractTools(frontmatter: Record<string, string | string[]>): string[] {
-  return Array.isArray(frontmatter.tools)
-    ? frontmatter.tools
-    : typeof frontmatter.tools === 'string'
-      ? frontmatter.tools.split(',').map((t) => t.trim()).filter(Boolean)
-      : [];
-}
-
-function parseFrontmatter(content: string): Record<string, string | string[]> {
-  const lines = content.split('\n');
-  if (lines[0]?.trim() !== '---') return {};
-
-  const endIndex = lines.slice(1).findIndex((line) => line.trim() === '---');
-  if (endIndex === -1) return {};
-
-  const frontmatterLines = lines.slice(1, endIndex + 1);
-  const result: Record<string, string | string[]> = {};
-  let currentKey: string | null = null;
-  let currentValue: string[] = [];
-  let multilineMode: 'folded' | 'literal' | 'list' | null = null;
-
-  for (const line of frontmatterLines) {
-    const keyMatch = line.match(/^([\w\-]+):\s*(.*)$/);
-    if (keyMatch) {
-      // Save previous key
-      if (currentKey) {
-        if (multilineMode === 'list') {
-          result[currentKey] = currentValue;
-        } else {
-          result[currentKey] = currentValue.join(
-            multilineMode === 'literal' ? '\n' : ' ',
-          );
-        }
-      }
-
-      currentKey = keyMatch[1];
-      const value = keyMatch[2].trim();
-
-      if (value === '>') {
-        multilineMode = 'folded';
-        currentValue = [];
-      } else if (value === '|') {
-        multilineMode = 'literal';
-        currentValue = [];
-      } else if (value === '') {
-        // Could be start of a list
-        multilineMode = 'list';
-        currentValue = [];
-      } else {
-        result[currentKey] = value;
-        currentKey = null;
-        currentValue = [];
-        multilineMode = null;
-      }
-    } else if (currentKey && multilineMode) {
-      const trimmedLine = line.trimStart();
-      if (multilineMode === 'list' && trimmedLine.startsWith('- ')) {
-        currentValue.push(trimmedLine.slice(2).trim());
-      } else if (trimmedLine) {
-        currentValue.push(trimmedLine);
-      }
-    }
-  }
-
-  // Save last key
-  if (currentKey) {
-    if (multilineMode === 'list') {
-      result[currentKey] = currentValue;
-    } else {
-      result[currentKey] = currentValue.join(
-        multilineMode === 'literal' ? '\n' : ' ',
-      );
-    }
-  }
-
-  return result;
-}
-
 function discoverAgents(): AgentDefinition[] {
-  const agentsDir = getAgentsDir();
-  if (!fs.existsSync(agentsDir)) return [];
-
-  const agents: AgentDefinition[] = [];
-
   try {
-    const entries = fs.readdirSync(agentsDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
-
-      const filePath = path.join(agentsDir, entry.name);
-      try {
-        const content = fs.readFileSync(filePath, 'utf-8');
-        const frontmatter = parseFrontmatter(content);
-        const stats = fs.statSync(filePath);
-        const id = entry.name.replace(/\.md$/, '');
-
-        agents.push({
-          id,
-          name: (frontmatter.name as string) || id,
-          description: (frontmatter.description as string) || '',
-          tools: extractTools(frontmatter),
-          updatedAt: stats.mtime.toISOString(),
-        });
-      } catch (err) {
-        logger.warn({ filePath, error: err instanceof Error ? err.message : String(err) }, 'Failed to parse agent file');
-      }
-    }
+    return loadAgentDefinitionFiles().map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      description: agent.description,
+      tools: agent.tools,
+      updatedAt: agent.updatedAt,
+    }));
   } catch {
-    // Directory not readable
+    return [];
   }
-
-  return agents;
 }
 
 function getAgentDetail(id: string): AgentDefinitionDetail | null {
   if (!validateAgentId(id)) return null;
 
-  const filePath = path.join(getAgentsDir(), `${id}.md`);
+  const filePath = path.join(getClaudeAgentsDir(), `${id}.md`);
   if (!fs.existsSync(filePath)) return null;
 
   try {
@@ -204,7 +104,7 @@ agentDefinitionsRoutes.put('/:id', authMiddleware, systemConfigMiddleware, async
     return c.json({ error: 'content must be a string' }, 400);
   }
 
-  const filePath = path.join(getAgentsDir(), `${id}.md`);
+  const filePath = path.join(getClaudeAgentsDir(), `${id}.md`);
   try {
     fs.accessSync(filePath);
     fs.writeFileSync(filePath, content, 'utf-8');
@@ -235,7 +135,7 @@ agentDefinitionsRoutes.post('/', authMiddleware, systemConfigMiddleware, async (
     return c.json({ error: 'Invalid agent name' }, 400);
   }
 
-  const agentsDir = getAgentsDir();
+  const agentsDir = getClaudeAgentsDir();
   fs.mkdirSync(agentsDir, { recursive: true });
 
   const filePath = path.join(agentsDir, `${id}.md`);
@@ -257,7 +157,7 @@ agentDefinitionsRoutes.delete('/:id', authMiddleware, systemConfigMiddleware, (c
     return c.json({ error: 'Invalid agent ID' }, 400);
   }
 
-  const filePath = path.join(getAgentsDir(), `${id}.md`);
+  const filePath = path.join(getClaudeAgentsDir(), `${id}.md`);
   try {
     fs.unlinkSync(filePath);
   } catch (err: unknown) {

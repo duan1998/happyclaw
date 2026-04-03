@@ -34,7 +34,7 @@ export type { StreamEventType, StreamEvent } from './types.js';
 
 import { sanitizeFilename, generateFallbackName } from './utils.js';
 import { StreamEventProcessor } from './stream-processor.js';
-import { PREDEFINED_AGENTS } from './agent-definitions.js';
+import { loadAllAgents } from './agent-definitions.js';
 import { createMcpTools } from './mcp-tools.js';
 
 // Debug log — must be declared before any log() call
@@ -1360,7 +1360,7 @@ async function runQuery(
           resetFullText: () => processor.resetFullTextAccumulator(),
         })] }]
       },
-      agents: PREDEFINED_AGENTS,
+      agents: loadAllAgents(),
     }
   });
     queryRef = q;
