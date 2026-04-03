@@ -494,6 +494,14 @@ export async function runContainerAgent(
     const containerName = `happyclaw-${safeName}${agentSuffix}-${Date.now()}`;
     const containerArgs = buildContainerArgs(mounts, containerName);
 
+    // Per-conversation model override: inject as docker -e before image name
+    if (input.agentModel) {
+      const imageIdx = containerArgs.indexOf(CONTAINER_IMAGE);
+      if (imageIdx !== -1) {
+        containerArgs.splice(imageIdx, 0, '-e', `ANTHROPIC_MODEL=${input.agentModel}`);
+      }
+    }
+
     logger.debug(
       {
         group: group.name,

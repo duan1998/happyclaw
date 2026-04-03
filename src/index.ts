@@ -3442,6 +3442,7 @@ async function runAgent(
       isHome,
       isAdminHome,
       images,
+      agentModel: group.default_model || undefined,
     };
 
     if (mainRuntime === 'codex' && executionMode === 'host') {
