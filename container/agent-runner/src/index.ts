@@ -74,7 +74,6 @@ let hadCompaction = false;
 // messages here instead of pushing them into the running stream. The main loop
 // picks them up after the current query finishes.
 let pendingModelSwitchMessages: { text: string; images?: Array<{ data: string; mimeType?: string }> }[] | null = null;
-let pendingModelSwitchNeedsFreshSession = false;
 // Module-level session ID so SIGTERM handler can emit it before exit.
 // Updated in main() whenever a query returns a new session.
 let latestSessionId: string | undefined;
@@ -1106,9 +1105,8 @@ async function runQuery(
 
     const { messages, agentModel } = drainIpcInput();
     if (agentModel && agentModel !== CLAUDE_MODEL && messages.length > 0) {
-      log(`Model switched during active query: ${CLAUDE_MODEL} -> ${agentModel}, deferring ${messages.length} message(s) to next query`);
+      log(`Model switched during active query: ${CLAUDE_MODEL} -> ${agentModel}, deferring ${messages.length} message(s) to next query while preserving session`);
       CLAUDE_MODEL = agentModel;
-      pendingModelSwitchNeedsFreshSession = true;
       pendingModelSwitchMessages = messages;
       stream.end();
       ipcPolling = false;
@@ -1116,9 +1114,8 @@ async function runQuery(
       return;
     }
     if (agentModel && agentModel !== CLAUDE_MODEL) {
-      log(`Model switched (during query, no message): ${CLAUDE_MODEL} -> ${agentModel}`);
+      log(`Model switched (during query, no message): ${CLAUDE_MODEL} -> ${agentModel} (session preserved)`);
       CLAUDE_MODEL = agentModel;
-      pendingModelSwitchNeedsFreshSession = true;
     }
     for (const msg of messages) {
       log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
@@ -1763,16 +1760,6 @@ async function main(): Promise<void> {
   const MAX_OVERFLOW_RETRIES = 3;
   let consecutiveCompactions = 0;
   const MAX_CONSECUTIVE_COMPACTIONS = 3;
-  const resetSessionForModelSwitch = (context: string): void => {
-    if (sessionId || resumeAt || latestSessionId) {
-      log(`Resetting session for model switch (${context}): session=${sessionId || 'new'} resumeAt=${resumeAt || 'latest'}`);
-    } else {
-      log(`Resetting session for model switch (${context}): no existing session`);
-    }
-    sessionId = undefined;
-    latestSessionId = undefined;
-    resumeAt = undefined;
-  };
   try {
     while (true) {
       // 清理残留的 _interrupt sentinel（空闲期间写入的中断信号不应影响下一次 query）。
@@ -1802,11 +1789,6 @@ async function main(): Promise<void> {
       if (queryResult.lastAssistantUuid) {
         resumeAt = queryResult.lastAssistantUuid;
       }
-      if (pendingModelSwitchNeedsFreshSession) {
-        resetSessionForModelSwitch('after active-query model change');
-        pendingModelSwitchNeedsFreshSession = false;
-      }
-
       // Session resume 失败（SDK 无法恢复旧会话）：清除 session，以新会话重试
       if (queryResult.sessionResumeFailed) {
         log(`Session resume failed, retrying with fresh session (old: ${sessionId})`);
@@ -2092,8 +2074,7 @@ async function main(): Promise<void> {
       prompt = nextMessage.text;
       promptImages = nextMessage.images;
       if (nextMessage.agentModel && nextMessage.agentModel !== CLAUDE_MODEL) {
-        resetSessionForModelSwitch('before next query');
-        log(`Model switched: ${CLAUDE_MODEL} -> ${nextMessage.agentModel}`);
+        log(`Model switched: ${CLAUDE_MODEL} -> ${nextMessage.agentModel} (session preserved)`);
         CLAUDE_MODEL = nextMessage.agentModel;
       }
       containerInput.turnId = generateTurnId();

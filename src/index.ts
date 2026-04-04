@@ -1641,7 +1641,6 @@ function handleModelCommand(chatJid: string, rawArgs: string): string {
     }
 
     updateAgentModel(target.agentId, undefined, nextModel);
-    deleteSession(target.folder, target.agentId);
 
     const updatedAgent = getAgent(target.agentId) ?? agent;
     broadcastAgentStatus(

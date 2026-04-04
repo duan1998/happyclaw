@@ -216,11 +216,16 @@ router.patch('/:jid/agents/:agentId', authMiddleware, async (c) => {
 
   if (newRuntime !== undefined || newModel !== undefined) {
     updateAgentModel(agentId, newRuntime, newModel);
-    if (runtimeChanged || modelChanged) {
+    if (runtimeChanged) {
       deleteSession(group.folder, agentId);
       writeDebugLog(
         'AGENT_UPDATE',
         `id=${agentId} reset_session=true runtimeChanged=${runtimeChanged} modelChanged=${modelChanged}`,
+      );
+    } else if (modelChanged) {
+      writeDebugLog(
+        'AGENT_UPDATE',
+        `id=${agentId} reset_session=false runtimeChanged=${runtimeChanged} modelChanged=${modelChanged}`,
       );
     }
   }
