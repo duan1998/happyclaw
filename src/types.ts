@@ -35,6 +35,15 @@ export interface ContainerConfig {
 
 export type ExecutionMode = 'container' | 'host';
 
+/**
+ * Permission profile for controlling agent tool access at the group level.
+ * Follows the Claude SDK allowedTools/disallowedTools pattern.
+ */
+export interface PermissionProfile {
+  allowedTools?: string[];
+  disallowedTools?: string[];
+}
+
 export interface RegisteredGroup {
   name: string;
   folder: string;
@@ -55,6 +64,7 @@ export interface RegisteredGroup {
   selected_mcps?: string[] | null; // custom 模式下选中的 MCP server IDs
   default_runtime?: 'claude' | 'codex';
   default_model?: string;
+  permissionProfile?: PermissionProfile;
 }
 
 export interface GroupMember {

@@ -118,6 +118,7 @@ export interface ContainerInput {
   agentId?: string;
   agentName?: string;
   agentModel?: string;
+  permissionProfile?: { allowedTools?: string[]; disallowedTools?: string[] };
 }
 
 export interface ContainerOutput {

@@ -157,6 +157,7 @@ interface GroupPayloadItem {
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
   default_runtime?: 'claude' | 'codex';
   default_model?: string;
+  permission_profile?: { allowedTools?: string[]; disallowedTools?: string[] } | null;
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
@@ -267,6 +268,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       activation_mode: group.activation_mode ?? 'auto',
       default_runtime: group.default_runtime ?? 'claude',
       default_model: group.default_model,
+      permission_profile: group.permissionProfile ?? null,
     };
   }
 
@@ -689,6 +691,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     execution_mode,
     default_runtime,
     default_model,
+    permission_profile,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -699,7 +702,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     activation_mode === undefined &&
     execution_mode === undefined &&
     default_runtime === undefined &&
-    default_model === undefined
+    default_model === undefined &&
+    permission_profile === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
   }
@@ -727,7 +731,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     activation_mode === undefined &&
     execution_mode === undefined &&
     default_runtime === undefined &&
-    default_model === undefined;
+    default_model === undefined &&
+    permission_profile === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -770,7 +775,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   }
 
   // Update registered group if any group-level field changed
-  if (name || activation_mode !== undefined || execution_mode !== undefined || default_runtime !== undefined || default_model !== undefined) {
+  if (name || activation_mode !== undefined || execution_mode !== undefined || default_runtime !== undefined || default_model !== undefined || permission_profile !== undefined) {
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -801,12 +806,27 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         default_model !== undefined
           ? (default_model ?? undefined)
           : existing.default_model,
+      permissionProfile:
+        permission_profile !== undefined
+          ? (permission_profile ?? undefined)
+          : existing.permissionProfile,
     };
+
+    if (permission_profile !== undefined) {
+      writeDebugLog(
+        'PERM_PROFILE',
+        `Updated permission_profile for ${jid}: runtime=${updated.default_runtime ?? 'claude'}, allowed=${updated.permissionProfile?.allowedTools?.length ?? 0}, disallowed=${updated.permissionProfile?.disallowedTools?.length ?? 0}`,
+      );
+    }
 
     setRegisteredGroup(jid, updated);
     if (name) updateChatName(jid, name);
     deps.getRegisteredGroups()[jid] = updated;
   }
+
+  const finalProfile = permission_profile !== undefined
+    ? (permission_profile ?? null)
+    : (existing.permissionProfile ?? null);
 
   return c.json({
     success: true,
@@ -816,6 +836,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
       default_model !== undefined
         ? (default_model ?? undefined)
         : existing.default_model,
+    permission_profile: finalProfile,
   });
 });
 

@@ -22,12 +22,13 @@ import { UsersPage } from './UsersPage';
 import { BindingsSection } from '../components/settings/BindingsSection';
 import { UsagePage } from './UsagePage';
 import { MonitorPage } from './MonitorPage';
+import { CommandsPage } from './CommandsPage';
 import { Card, CardContent } from '@/components/ui/card';
 import type { SettingsTab } from '../components/settings/types';
 
-const VALID_TABS: SettingsTab[] = ['claude', 'codex', 'registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor'];
+const VALID_TABS: SettingsTab[] = ['claude', 'codex', 'registration', 'appearance', 'system', 'profile', 'my-channels', 'security', 'groups', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'users', 'about', 'bindings', 'usage', 'monitor', 'commands'];
 const SYSTEM_TABS: SettingsTab[] = ['claude', 'codex', 'registration', 'appearance', 'system'];
-const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'users', 'bindings', 'usage', 'monitor'];
+const FULLPAGE_TABS: SettingsTab[] = ['groups', 'memory', 'skills', 'mcp-servers', 'agent-definitions', 'users', 'bindings', 'usage', 'monitor', 'commands'];
 
 export function SettingsPage() {
   const { user: currentUser } = useAuthStore();
@@ -81,6 +82,7 @@ export function SettingsPage() {
     tabs.push({ key: 'skills', label: '技能' });
     tabs.push({ key: 'mcp-servers', label: 'MCP' });
     tabs.push({ key: 'agent-definitions', label: 'Agent' });
+    tabs.push({ key: 'commands', label: '命令' });
     tabs.push({ key: 'bindings', label: 'IM 绑定' });
     tabs.push({ key: 'usage', label: '用量' });
     if (canManageSystemConfig) {
@@ -120,6 +122,7 @@ export function SettingsPage() {
     'agent-definitions': 'Agent 管理',
     users: '用户管理',
     about: '关于',
+    commands: '命令模板',
     bindings: 'IM 绑定',
     usage: '用量统计',
     monitor: '系统监控',
@@ -189,6 +192,7 @@ export function SettingsPage() {
             {activeTab === 'mcp-servers' && <McpServersPage />}
             {activeTab === 'agent-definitions' && <AgentDefinitionsPage />}
             {activeTab === 'users' && <UsersPage />}
+            {activeTab === 'commands' && <CommandsPage />}
             {activeTab === 'bindings' && <BindingsSection />}
             {activeTab === 'usage' && <UsagePage />}
             {activeTab === 'monitor' && <MonitorPage />}

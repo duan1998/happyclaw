@@ -25,7 +25,7 @@ import {
   updateAgentModel,
   updateChatName,
 } from '../db.js';
-import { DATA_DIR } from '../config.js';
+import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import {
   clearImBindingTargets,
   shouldClearPersistedAgentRoute,
@@ -328,6 +328,18 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
   );
   try {
     fs.rmSync(agentSessionDir, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+
+  // Clean up agent-memory directory (legacy or leftover)
+  const agentMemoryDir = path.join(GROUPS_DIR, group.folder, 'agent-memory', agentId);
+  try {
+    fs.rmSync(agentMemoryDir, { recursive: true, force: true });
+    const parentDir = path.join(GROUPS_DIR, group.folder, 'agent-memory');
+    if (fs.existsSync(parentDir) && fs.readdirSync(parentDir).length === 0) {
+      fs.rmdirSync(parentDir);
+    }
   } catch {
     /* ignore */
   }

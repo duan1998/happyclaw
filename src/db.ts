@@ -663,6 +663,7 @@ export function initDatabase(): void {
   ensureColumn('messages', 'finalization_reason', 'TEXT');
   ensureColumn('registered_groups', 'default_runtime', "TEXT DEFAULT 'claude'");
   ensureColumn('registered_groups', 'default_model', 'TEXT');
+  ensureColumn('registered_groups', 'permission_profile', 'TEXT');
   ensureColumn('agents', 'agent_runtime', "TEXT DEFAULT 'claude'");
   ensureColumn('agents', 'agent_model', 'TEXT');
 
@@ -1193,7 +1194,7 @@ export function initDatabase(): void {
     db.exec('ALTER TABLE agents ADD COLUMN spawned_from_jid TEXT');
   }
 
-  const SCHEMA_VERSION = '33';
+  const SCHEMA_VERSION = '34';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2226,6 +2227,7 @@ type RegisteredGroupRow = {
   selected_mcps: string | null;
   default_runtime: string | null;
   default_model: string | null;
+  permission_profile: string | null;
 };
 
 /** Convert a raw DB row into a RegisteredGroup domain object. */
@@ -2253,6 +2255,9 @@ function parseGroupRow(
     activation_mode: parseActivationMode(row.activation_mode),
     default_runtime: row.default_runtime === 'codex' ? 'codex' : 'claude',
     default_model: row.default_model ?? undefined,
+    permissionProfile: row.permission_profile
+      ? JSON.parse(row.permission_profile)
+      : undefined,
   };
 }
 
@@ -2283,8 +2288,8 @@ export function getRegisteredGroup(
 
 export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
   db.prepare(
-    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, default_runtime, default_model)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO registered_groups (jid, name, folder, added_at, container_config, execution_mode, custom_cwd, init_source_path, init_git_url, created_by, is_home, selected_skills, target_agent_id, target_main_jid, reply_policy, require_mention, activation_mode, mcp_mode, selected_mcps, default_runtime, default_model, permission_profile)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     jid,
     group.name,
@@ -2307,6 +2312,7 @@ export function setRegisteredGroup(jid: string, group: RegisteredGroup): void {
     null, // selected_mcps: deprecated, always null
     group.default_runtime ?? 'claude',
     group.default_model ?? null,
+    group.permissionProfile ? JSON.stringify(group.permissionProfile) : null,
   );
 }
 

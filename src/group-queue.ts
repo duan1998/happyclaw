@@ -9,6 +9,7 @@ import { getSystemSettings } from './runtime-config.js';
 import { logger } from './logger.js';
 import { writeDebugLog } from './debug-log.js';
 export type SendMessageResult = 'sent' | 'no_active';
+type PermissionProfilePayload = { allowedTools?: string[]; disallowedTools?: string[] } | null;
 
 interface QueuedTask {
   id: string;
@@ -459,6 +460,7 @@ export class GroupQueue {
     images?: Array<{ data: string; mimeType?: string }>,
     onInjected?: () => void,
     agentModel?: string,
+    permissionProfile?: PermissionProfilePayload,
   ): SendMessageResult {
     const state = this.resolveActiveState(groupJid);
     if (!state) return 'no_active';
@@ -496,7 +498,17 @@ export class GroupQueue {
       const tempPath = `${filepath}.tmp`;
       const ipcPayload: Record<string, unknown> = { type: 'message', text, images };
       if (agentModel) ipcPayload.agentModel = agentModel;
-      writeDebugLog('IPC', `sendMessage agentModel=${agentModel || '(none)'} file=${filename}`);
+      if (permissionProfile !== undefined) ipcPayload.permissionProfile = permissionProfile;
+      writeDebugLog(
+        'IPC',
+        `sendMessage agentModel=${agentModel || '(none)'} permissionProfile=${
+          permissionProfile === undefined
+            ? '(unchanged)'
+            : permissionProfile === null
+              ? 'clear'
+              : `allowed=${permissionProfile.allowedTools?.length ?? 0},disallowed=${permissionProfile.disallowedTools?.length ?? 0}`
+        } file=${filename}`,
+      );
       fs.writeFileSync(tempPath, JSON.stringify(ipcPayload));
       fs.renameSync(tempPath, filepath);
       state.queryInFlight = true;

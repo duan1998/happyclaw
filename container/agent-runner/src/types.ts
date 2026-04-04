@@ -24,6 +24,7 @@ export interface ContainerInput {
   images?: Array<{ data: string; mimeType?: string }>;
   agentId?: string;
   agentName?: string;
+  permissionProfile?: { allowedTools?: string[]; disallowedTools?: string[] };
 }
 
 export interface ContainerOutput {

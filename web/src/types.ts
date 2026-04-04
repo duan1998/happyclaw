@@ -19,6 +19,10 @@ export interface GroupInfo {
   activation_mode?: 'auto' | 'always' | 'when_mentioned' | 'disabled';
   default_runtime?: 'claude' | 'codex';
   default_model?: string;
+  permission_profile?: {
+    allowedTools?: string[];
+    disallowedTools?: string[];
+  } | null;
 }
 
 export interface AgentInfo {

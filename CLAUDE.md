@@ -56,6 +56,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/im-channel.ts` | 统一 IM 通道接口（`IMChannel`）、Feishu/Telegram 适配器工厂 |
 | `src/commands.ts` | Web 端斜杠命令处理器（`/clear` 重置会话） |
 | `src/im-command-utils.ts` | IM 斜杠命令纯函数工具：`formatWorkspaceList()`、`formatContextMessages()` |
+| `src/custom-commands.ts` | 自定义 IM 斜杠命令：Markdown 文件发现、YAML frontmatter 解析、模板参数替换 |
 | `src/telegram-pairing.ts` | Telegram 配对码：6 位随机码，5 分钟过期 |
 | `src/terminal-manager.ts` | Docker 容器终端管理（node-pty + pipe fallback，WebSocket 双向通信） |
 | `src/message-attachments.ts` | 图片附件规范化（MIME 检测、Data URL 解析） |
@@ -102,7 +103,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 
 Agent Runner（`container/agent-runner/`）在 Docker 容器或宿主机进程中执行：
 
-- **输入协议**：stdin 接收初始 JSON（`ContainerInput`：prompt、sessionId、groupFolder、chatJid、isHome、isAdminHome），IPC 文件接收后续消息
+- **输入协议**：stdin 接收初始 JSON（`ContainerInput`：prompt、sessionId、groupFolder、chatJid、isHome、isAdminHome、permissionProfile），IPC 文件接收后续消息
 - **输出协议**：stdout 输出 `OUTPUT_START_MARKER...OUTPUT_END_MARKER` 包裹的 JSON（`ContainerOutput`：status、result、newSessionId、streamEvent）
 - **流式事件**：`text_delta`、`thinking_delta`、`tool_use_start/end`、`tool_progress`、`hook_started/progress/response`、`task_start`、`task_notification`、`status`、`init` —— 通过 WebSocket `stream_event` 消息广播到 Web 端
 - **文本缓冲**：`text_delta` 累积到 200 字符后刷新，避免高频小包
@@ -322,7 +323,7 @@ SQLite WAL 模式，Schema 经历 v1→v24 演进（`db.ts` 中的 `SCHEMA_VERSI
 | `messages` | `(id, chat_jid)` | 消息历史（含 `is_from_me`、`source` 标识来源、`attachments`） |
 | `scheduled_tasks` | `id` | 定时任务（调度类型、上下文模式、状态、`execution_type`、`script_command`、`created_by`） |
 | `task_run_logs` | `id` (auto) | 任务执行日志（耗时、状态、结果） |
-| `registered_groups` | `jid` | 注册的会话（folder 映射、容器配置、执行模式、`customCwd`、`is_home`、`init_source_path`、`init_git_url`、`selected_skills`、`require_mention`） |
+| `registered_groups` | `jid` | 注册的会话（folder 映射、容器配置、执行模式、`customCwd`、`is_home`、`init_source_path`、`init_git_url`、`selected_skills`、`require_mention`、`permission_profile`） |
 | `sessions` | `(group_folder, agent_id)` | 会话 ID 映射（Claude session 持久化，支持 Sub-Agent 独立会话） |
 | `router_state` | `key` | KV 存储（`last_timestamp`、`last_agent_timestamp`） |
 | `users` | `id` | 用户账户（密码哈希、角色、权限、状态、`ai_name`、`ai_avatar_emoji`、`ai_avatar_color`、`avatar_emoji`、`avatar_color`、`ai_avatar_url`、`deleted_at`） |
@@ -349,8 +350,10 @@ data/
   groups/{folder}/logs/                    # Agent 容器日志
   groups/{folder}/conversations/           # 对话归档（PreCompact Hook 写入）
   groups/{folder}/downloads/{channel}/     # IM 文件/图片下载目录（feishu / telegram / dingtalk，按日期分子目录）
+  groups/{folder}/commands/                # Per-group 自定义 IM 斜杠命令（.md 文件，支持子目录命名空间）
   groups/user-global/{userId}/             # 用户级全局记忆目录
   groups/user-global/{userId}/CLAUDE.md    # 用户全局记忆（Agent 自动维护，per-user 隔离）
+  groups/user-global/{userId}/commands/    # 用户级自定义 IM 斜杠命令（被 per-group 同名命令覆盖）
   sessions/{folder}/.claude/               # Claude 会话持久化（隔离）
   ipc/{folder}/input/                      # IPC 输入通道
   ipc/{folder}/messages/                   # IPC 消息输出
@@ -555,6 +558,16 @@ scripts/                      # 构建辅助脚本
 
 `/recall` 通过 `execFile('claude', ['--print'])` + stdin 管道调用 Claude CLI，复用与 Agent Runner 相同的 OAuth 认证机制。
 
+**自定义命令**：除硬编码命令外，系统支持用户通过 Markdown 文件定义自定义斜杠命令（`src/custom-commands.ts`）。未知命令先查找自定义命令，仍未匹配才作为普通消息处理。
+
+- **存储位置**：用户级 `data/groups/user-global/{userId}/commands/`，群组级 `data/groups/{folder}/commands/`
+- **优先级**：群组级 > 用户级（同名命令群组级覆盖）
+- **文件格式**：`.md` 文件，支持 YAML frontmatter（`description`、`argument-hint`、`mode`）+ 正文模板
+- **模板变量**：`$ARGUMENTS`（完整参数）、`$1`/`$2`/...（位置参数）
+- **执行模式**：`mode: agent`（默认，展开后作为用户消息注入 Agent 处理流程）、`mode: reply`（直接返回展开后的文本）
+- **命名空间**：子目录形成命名空间（`ops/restart.md` → `/ops:restart`）
+- `/help` 命令自动列出当前可用的自定义命令
+
 ### 8.12 群聊 Mention 控制
 
 飞书群聊支持 per-group 的 @mention 控制，类似 OpenClaw 的 `resolveGroupActivationFor()` 机制：
@@ -567,6 +580,16 @@ scripts/                      # 构建辅助脚本
 **实现原理**：连接飞书时通过 Bot Info API 获取 bot 的 `open_id`，收到群消息后检查 `mentions[].id.open_id` 是否包含 bot。如果 bot 未被 @mention 且该群 `require_mention=true`，则静默丢弃该消息。
 
 **前置条件**：飞书应用需要 `im:message.group_msg` 敏感权限（实时接收群里所有消息）。`im:message:readonly` 仅控制 REST API 读取历史消息，不影响 WebSocket 实时推送。没有 `im:message.group_msg` 权限时，平台层只推送 @消息，`require_mention=false` 无法生效。
+
+### 8.13 Per-group 权限配置（Permission Profile）
+
+每个群组（`registered_groups`）可配置 `permission_profile`，控制该群组的 Agent 可用工具：
+
+- **数据结构**：`{ allowedTools?: string[], disallowedTools?: string[] }`（JSON 存储在 `permission_profile` 列）
+- **API**：通过 `PATCH /api/groups/:jid` 的 `permission_profile` 字段设置（传 `null` 清除）
+- **生效链路**：`src/index.ts` 构建 `ContainerInput` → `permissionProfile` 字段 → agent-runner `applyPermissionProfile()` 合并到 SDK `query()` 的 `allowedTools`/`disallowedTools`
+- **合并规则**：`profile.allowedTools` 若非空则**替换**默认工具集（`DEFAULT_ALLOWED_TOOLS`）；`profile.disallowedTools` 始终**追加**（叠加禁止）
+- **未配置时**：行为不变，使用默认工具集
 
 ## 9. 环境变量
 
@@ -714,6 +737,7 @@ make help          # 列出所有可用的 make 命令
 | `tests/units/group-chat.test.ts` | 群聊场景 | B1, B2, B5, B6 |
 | `tests/units/dm-integration.test.ts` | DM 集成 | A1, A2, A3, A5, A8 |
 | `tests/channel-prefixes.test.ts` | 渠道前缀映射 | D1 |
+| `tests/custom-commands.test.ts` | 自定义命令（发现、解析、模板展开） | - |
 | `tests/helpers/im-utils.ts` | 测试工具（纯函数副本） | - |
 
 **重要约束**：

@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { BookOpen } from 'lucide-react';
+import { BookOpen, Terminal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { GroupInfo } from '../../stores/groups';
 
@@ -59,7 +59,7 @@ export function GroupDetail({ group }: GroupDetailProps) {
       )}
 
       {/* Quick Actions */}
-      <div className="pt-2 border-t border-border">
+      <div className="pt-2 border-t border-border flex flex-wrap gap-2">
         <Button
           variant="outline"
           size="sm"
@@ -67,6 +67,14 @@ export function GroupDetail({ group }: GroupDetailProps) {
         >
           <BookOpen className="w-4 h-4" />
           记忆管理
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => navigate(`/settings?tab=commands&folder=${encodeURIComponent(group.folder)}`)}
+        >
+          <Terminal className="w-4 h-4" />
+          命令模板
         </Button>
       </div>
     </div>

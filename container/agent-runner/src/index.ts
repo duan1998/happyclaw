@@ -74,7 +74,6 @@ const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/gro
 const WORKSPACE_GLOBAL = process.env.HAPPYCLAW_WORKSPACE_GLOBAL || '/workspace/global';
 const WORKSPACE_MEMORY = process.env.HAPPYCLAW_WORKSPACE_MEMORY || '/workspace/memory';
 const WORKSPACE_IPC = process.env.HAPPYCLAW_WORKSPACE_IPC || '/workspace/ipc';
-
 // 模型配置：支持别名（opus/sonnet/haiku）或完整模型 ID
 // 别名自动解析为最新版本，如 opus → Opus 4.6
 // [1m] 后缀启用 1M 上下文窗口（CLI 内部 jG() 识别后缀，sM() 返回 1M 窗口）
@@ -89,10 +88,14 @@ const IPC_FALLBACK_POLL_MS = 5000; // 后备轮询间隔（仅防止 inotify 事
 let needsMemoryFlush = false;
 let hadCompaction = false;
 
-// When a model switch is detected during an active query, we store the pending
-// messages here instead of pushing them into the running stream. The main loop
-// picks them up after the current query finishes.
-let pendingModelSwitchMessages: { text: string; images?: Array<{ data: string; mimeType?: string }> }[] | null = null;
+type DeferredIpcMessage = { text: string; images?: Array<{ data: string; mimeType?: string }> };
+
+// When runtime-affecting IPC updates arrive during an active query (model switch
+// or permission profile change), we defer those messages to the next query so
+// they execute under the new settings instead of the old in-flight settings.
+let pendingDeferredMessages: DeferredIpcMessage[] | null = null;
+let pendingDeferredPermissionProfile: ContainerInput['permissionProfile'] | null | undefined;
+let pendingDeferredPermissionProfileUpdateExists = false;
 // Module-level session ID so SIGTERM handler can emit it before exit.
 // Updated in main() whenever a query returns a new session.
 let latestSessionId: string | undefined;
@@ -107,6 +110,76 @@ const DEFAULT_ALLOWED_TOOLS = [
   'NotebookEdit',
   'mcp__happyclaw__*'
 ];
+
+/**
+ * All tools that the SDK exposes — used to compute the deny list when a
+ * permission profile specifies only an allowlist.  Under `bypassPermissions`
+ * mode, `allowedTools` only controls auto-approval and does NOT hide tools
+ * from the model.  The only way to truly restrict is `disallowedTools`.
+ *
+ * So when the profile says "only allow X, Y, Z" we must compute the
+ * complement: everything in the default set *not* in the allow list becomes
+ * a `disallowedTools` entry.
+ */
+const ALL_KNOWN_TOOLS = [
+  'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep',
+  'WebSearch', 'WebFetch',
+  'Task', 'TaskOutput', 'TaskStop',
+  'TeamCreate', 'TeamDelete', 'SendMessage',
+  'TodoWrite', 'ToolSearch', 'Skill', 'NotebookEdit',
+  'mcp__happyclaw__send_message',
+  'mcp__happyclaw__schedule_task',
+  'mcp__happyclaw__list_tasks',
+  'mcp__happyclaw__pause_task',
+  'mcp__happyclaw__resume_task',
+  'mcp__happyclaw__cancel_task',
+  'mcp__happyclaw__register_group',
+  'mcp__happyclaw__install_skill',
+  'mcp__happyclaw__uninstall_skill',
+  'mcp__happyclaw__memory_search',
+  'mcp__happyclaw__memory_get',
+  'mcp__happyclaw__memory_append',
+];
+
+/**
+ * Merge permission profile overrides onto the default tool sets.
+ *
+ * Under `bypassPermissions`, `allowedTools` alone cannot restrict — so we
+ * convert profile.allowedTools into an explicit `disallowedTools` deny list
+ * (everything not allowed = disallowed).  profile.disallowedTools is always
+ * appended additively on top.
+ */
+function applyPermissionProfile(
+  defaults: string[],
+  profile?: ContainerInput['permissionProfile'],
+): { allowedTools: string[]; disallowedTools?: string[] } {
+  if (!profile) return { allowedTools: defaults };
+
+  const deny = new Set<string>();
+
+  // If the profile specifies an allowlist, compute the complement as deny
+  if (profile.allowedTools?.length) {
+    const allowSet = new Set(profile.allowedTools);
+    for (const tool of ALL_KNOWN_TOOLS) {
+      if (!allowSet.has(tool)) deny.add(tool);
+    }
+    log(`[PERM_PROFILE] Allowlist (${profile.allowedTools.length} tools) → computed ${deny.size} disallowed tools`);
+  }
+
+  // Explicit deny entries are always added on top
+  if (profile.disallowedTools?.length) {
+    for (const tool of profile.disallowedTools) deny.add(tool);
+    log(`[PERM_PROFILE] Explicit disallowedTools: ${profile.disallowedTools.join(', ')}`);
+  }
+
+  const disallowedTools = deny.size > 0 ? [...deny] : undefined;
+  const allowedTools = profile.allowedTools?.length
+    ? profile.allowedTools
+    : defaults;
+
+  log(`[PERM_PROFILE] Final: allowed=${allowedTools.length}, disallowed=${disallowedTools?.length ?? 0}`);
+  return { allowedTools, disallowedTools };
+}
 
 const MEMORY_FLUSH_ALLOWED_TOOLS = [
   'mcp__happyclaw__memory_search',
@@ -878,8 +951,10 @@ function shouldDrain(): boolean {
  * Returns messages found (with optional images), or empty array.
  */
 interface IpcDrainResult {
-  messages: Array<{ text: string; images?: Array<{ data: string; mimeType?: string }> }>;
+  messages: DeferredIpcMessage[];
   agentModel?: string;
+  permissionProfile?: ContainerInput['permissionProfile'] | null;
+  hasPermissionProfileUpdate?: boolean;
 }
 
 function applyPendingAgentModel(agentModel: string | undefined, context: string): void {
@@ -887,6 +962,27 @@ function applyPendingAgentModel(agentModel: string | undefined, context: string)
     log(`Model switched (${context}): ${CLAUDE_MODEL} -> ${agentModel}`);
     CLAUDE_MODEL = agentModel;
   }
+}
+
+function summarizePermissionProfile(
+  permissionProfile: ContainerInput['permissionProfile'] | null | undefined,
+  hasUpdate = true,
+): string {
+  if (!hasUpdate) return '(unchanged)';
+  if (permissionProfile === null) return 'clear';
+  if (!permissionProfile) return '(unchanged)';
+  return `allowed=${permissionProfile.allowedTools?.length ?? 0}, disallowed=${permissionProfile.disallowedTools?.length ?? 0}`;
+}
+
+function applyPendingPermissionProfile(
+  containerInput: ContainerInput,
+  permissionProfile: ContainerInput['permissionProfile'] | null | undefined,
+  context: string,
+  hasUpdate = true,
+): void {
+  if (!hasUpdate) return;
+  containerInput.permissionProfile = permissionProfile ?? undefined;
+  log(`[PERM_PROFILE] Applied IPC update (${context}): ${summarizePermissionProfile(permissionProfile, true)}`);
 }
 
 function drainIpcInput(): IpcDrainResult {
@@ -909,6 +1005,11 @@ function drainIpcInput(): IpcDrainResult {
           if (data.agentModel) {
             log(`[MODEL-DEBUG] IPC file contains agentModel=${data.agentModel}`);
             result.agentModel = data.agentModel;
+          }
+          if (Object.prototype.hasOwnProperty.call(data, 'permissionProfile')) {
+            result.permissionProfile = (data.permissionProfile ?? null) as ContainerInput['permissionProfile'] | null;
+            result.hasPermissionProfileUpdate = true;
+            log(`[PERM_PROFILE] IPC file contains permissionProfile=${summarizePermissionProfile(result.permissionProfile, true)}`);
           }
         }
       } catch (err) {
@@ -980,7 +1081,13 @@ function createIpcWatcher(onFileDetected: () => void): { close: () => void } {
  * Wait for a new IPC message or _close sentinel.
  * Returns the messages (with optional images), or null if _close.
  */
-function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: string; mimeType?: string }>; agentModel?: string } | null> {
+function waitForIpcMessage(): Promise<{
+  text: string;
+  images?: Array<{ data: string; mimeType?: string }>;
+  agentModel?: string;
+  permissionProfile?: ContainerInput['permissionProfile'] | null;
+  hasPermissionProfileUpdate?: boolean;
+} | null> {
   return new Promise((resolve) => {
     let resolved = false;
     const tryDrain = () => {
@@ -1006,14 +1113,20 @@ function waitForIpcMessage(): Promise<{ text: string; images?: Array<{ data: str
         clearInterruptRequested();
       }
 
-      const { messages, agentModel } = drainIpcInput();
+      const { messages, agentModel, permissionProfile, hasPermissionProfileUpdate } = drainIpcInput();
 
       if (messages.length > 0) {
         const combinedText = messages.map((m) => m.text).join('\n');
         const allImages = messages.flatMap((m) => m.images || []);
         resolved = true;
         ipcWatcher?.close();
-        resolve({ text: combinedText, images: allImages.length > 0 ? allImages : undefined, agentModel });
+        resolve({
+          text: combinedText,
+          images: allImages.length > 0 ? allImages : undefined,
+          agentModel,
+          permissionProfile,
+          hasPermissionProfileUpdate,
+        });
         return;
       }
     };
@@ -1265,19 +1378,30 @@ async function runQuery(
       return; // No setTimeout needed — watcher will trigger next check on file change
     }
 
-    const { messages, agentModel } = drainIpcInput();
-    if (agentModel && agentModel !== CLAUDE_MODEL && messages.length > 0) {
-      log(`Model switched during active query: ${CLAUDE_MODEL} -> ${agentModel}, deferring ${messages.length} message(s) to next query while preserving session`);
-      CLAUDE_MODEL = agentModel;
-      pendingModelSwitchMessages = messages;
+    const { messages, agentModel, permissionProfile, hasPermissionProfileUpdate } = drainIpcInput();
+    const hasModelSwitch = !!agentModel && agentModel !== CLAUDE_MODEL;
+    if ((hasModelSwitch || hasPermissionProfileUpdate) && messages.length > 0) {
+      if (hasModelSwitch) {
+        log(`Model switched during active query: ${CLAUDE_MODEL} -> ${agentModel}, deferring ${messages.length} message(s) to next query while preserving session`);
+        CLAUDE_MODEL = agentModel!;
+      }
+      if (hasPermissionProfileUpdate) {
+        pendingDeferredPermissionProfile = permissionProfile;
+        pendingDeferredPermissionProfileUpdateExists = true;
+        log(`[PERM_PROFILE] Update received during active query, deferring ${messages.length} message(s) to next query: ${summarizePermissionProfile(permissionProfile, true)}`);
+      }
+      pendingDeferredMessages = messages;
       stream.end();
       ipcPolling = false;
       ipcQueryWatcher.close();
       return;
     }
-    if (agentModel && agentModel !== CLAUDE_MODEL) {
+    if (hasModelSwitch) {
       log(`Model switched (during query, no message): ${CLAUDE_MODEL} -> ${agentModel} (session preserved)`);
-      CLAUDE_MODEL = agentModel;
+      CLAUDE_MODEL = agentModel!;
+    }
+    if (hasPermissionProfileUpdate) {
+      applyPendingPermissionProfile(containerInput, permissionProfile, 'during query, no message', true);
     }
     for (const msg of messages) {
       log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
@@ -1925,6 +2049,12 @@ async function main(): Promise<void> {
     }
   }
   applyPendingAgentModel(pendingDrain.agentModel, 'before query start');
+  applyPendingPermissionProfile(
+    containerInput,
+    pendingDrain.permissionProfile,
+    'before query start',
+    pendingDrain.hasPermissionProfileUpdate ?? false,
+  );
 
   // Query loop: run query -> wait for IPC message -> run new query -> repeat
   let resumeAt: string | undefined;
@@ -1949,6 +2079,7 @@ async function main(): Promise<void> {
 
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'}, model: ${CLAUDE_MODEL})...`);
 
+      const effectiveTools = applyPermissionProfile(DEFAULT_ALLOWED_TOOLS, containerInput.permissionProfile);
       const queryResult = await runQuery(
         prompt,
         sessionId,
@@ -1957,8 +2088,8 @@ async function main(): Promise<void> {
         memoryRecallPrompt,
         resumeAt,
         true,
-        DEFAULT_ALLOWED_TOOLS,
-        undefined,
+        effectiveTools.allowedTools,
+        effectiveTools.disallowedTools,
         promptImages,
       );
       if (queryResult.newSessionId) {
@@ -2046,18 +2177,26 @@ async function main(): Promise<void> {
         // 清理可能残留的 _interrupt 文件
         try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
 
-        // Check for deferred model-switch messages first
-        if (pendingModelSwitchMessages && pendingModelSwitchMessages.length > 0) {
+        // Check for deferred runtime-setting messages first
+        if (pendingDeferredMessages && pendingDeferredMessages.length > 0) {
           if (shouldClose() || shouldDrain()) {
-            log('Close/drain sentinel received before deferred model-switch message after interrupt, exiting');
+            log('Close/drain sentinel received before deferred runtime-setting message after interrupt, exiting');
             writeOutput({ status: 'success', result: null, newSessionId: sessionId });
             break;
           }
-          const pending = pendingModelSwitchMessages;
-          pendingModelSwitchMessages = null;
+          const pending = pendingDeferredMessages;
+          pendingDeferredMessages = null;
           const combinedText = pending.map((m) => m.text).join('\n');
           const combinedImages = pending.flatMap((m) => m.images || []);
-          log(`Using ${pending.length} deferred model-switch message(s) after interrupt, model: ${CLAUDE_MODEL}`);
+          applyPendingPermissionProfile(
+            containerInput,
+            pendingDeferredPermissionProfile,
+            'deferred after interrupt',
+            pendingDeferredPermissionProfileUpdateExists,
+          );
+          pendingDeferredPermissionProfile = undefined;
+          pendingDeferredPermissionProfileUpdateExists = false;
+          log(`Using ${pending.length} deferred runtime-setting message(s) after interrupt, model: ${CLAUDE_MODEL}`);
           prompt = combinedText;
           promptImages = combinedImages.length > 0 ? combinedImages : undefined;
           clearInterruptRequested();
@@ -2081,6 +2220,12 @@ async function main(): Promise<void> {
           log(`Model switched: ${CLAUDE_MODEL} -> ${nextMessage.agentModel}`);
           CLAUDE_MODEL = nextMessage.agentModel;
         }
+        applyPendingPermissionProfile(
+          containerInput,
+          nextMessage.permissionProfile,
+          'before next query after interrupt',
+          nextMessage.hasPermissionProfileUpdate ?? false,
+        );
         containerInput.turnId = generateTurnId();
         continue;
       }
@@ -2161,8 +2306,8 @@ async function main(): Promise<void> {
             memoryRecallPrompt,
             resumeAt,
             true,
-            DEFAULT_ALLOWED_TOOLS,
-            undefined,
+            effectiveTools.allowedTools,
+            effectiveTools.disallowedTools,
             undefined,
             'auto_continue',
           );
@@ -2220,21 +2365,29 @@ async function main(): Promise<void> {
 
       log('Query ended, waiting for next IPC message...');
 
-      // If model was switched during the query, pick up deferred messages immediately
-      if (pendingModelSwitchMessages && pendingModelSwitchMessages.length > 0) {
+      // If runtime settings changed during the query, pick up deferred messages immediately
+      if (pendingDeferredMessages && pendingDeferredMessages.length > 0) {
         if (shouldClose()) {
-          log('Close sentinel received before deferred model-switch message, exiting');
+          log('Close sentinel received before deferred runtime-setting message, exiting');
           break;
         }
         if (shouldDrain()) {
-          log('Drain sentinel received before deferred model-switch message, exiting after completed query');
+          log('Drain sentinel received before deferred runtime-setting message, exiting after completed query');
           break;
         }
-        const pending = pendingModelSwitchMessages;
-        pendingModelSwitchMessages = null;
+        const pending = pendingDeferredMessages;
+        pendingDeferredMessages = null;
         const combinedText = pending.map((m) => m.text).join('\n');
         const combinedImages = pending.flatMap((m) => m.images || []);
-        log(`Using ${pending.length} deferred model-switch message(s) (${combinedText.length} chars), model: ${CLAUDE_MODEL}`);
+        applyPendingPermissionProfile(
+          containerInput,
+          pendingDeferredPermissionProfile,
+          'deferred before next query',
+          pendingDeferredPermissionProfileUpdateExists,
+        );
+        pendingDeferredPermissionProfile = undefined;
+        pendingDeferredPermissionProfileUpdateExists = false;
+        log(`Using ${pending.length} deferred runtime-setting message(s) (${combinedText.length} chars), model: ${CLAUDE_MODEL}`);
         prompt = combinedText;
         promptImages = combinedImages.length > 0 ? combinedImages : undefined;
         containerInput.turnId = generateTurnId();
@@ -2255,6 +2408,12 @@ async function main(): Promise<void> {
         log(`Model switched: ${CLAUDE_MODEL} -> ${nextMessage.agentModel} (session preserved)`);
         CLAUDE_MODEL = nextMessage.agentModel;
       }
+      applyPendingPermissionProfile(
+        containerInput,
+        nextMessage.permissionProfile,
+        'before next query',
+        nextMessage.hasPermissionProfileUpdate ?? false,
+      );
       containerInput.turnId = generateTurnId();
     }
   } catch (err) {

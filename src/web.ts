@@ -54,6 +54,7 @@ import agentDefinitionsRoutes from './routes/agent-definitions.js';
 import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
 import bugReportRoutes from './routes/bug-report.js';
+import commandRoutes from './routes/commands.js';
 import {
   checkBillingAccess,
   formatBillingAccessDeniedMessage,
@@ -181,6 +182,8 @@ app.route('/api', monitorRoutes);
 app.route('/api/usage', usageRoutes);
 app.route('/api/billing', billingRoutes);
 app.route('/api/bug-report', bugReportRoutes);
+app.route('/api/groups', commandRoutes); // Workspace commands under /api/groups/:jid/commands
+app.route('/api/commands', commandRoutes); // Global commands under /api/commands/global
 
 // --- POST /api/messages ---
 
@@ -356,6 +359,7 @@ async function handleWebUserMessage(
       updateRoute?.(group.folder, null);
     },
     group.default_model || undefined,
+    group.permissionProfile ?? null,
   );
   if (sendResult === 'sent') {
     pipedToActive = true;
@@ -467,6 +471,7 @@ async function handleAgentConversationMessage(
     agentImages,
     undefined,
     agent.agent_model || undefined,
+    getRegisteredGroup(chatJid)?.permissionProfile ?? null,
   );
   if (agentSendResult === 'no_active') {
     // No running process — force close any stale state and start fresh.

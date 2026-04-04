@@ -110,6 +110,11 @@ import {
   resolveLocationInfo,
   type WorkspaceInfo,
 } from './im-command-utils.js';
+import {
+  discoverCommands,
+  expandTemplate,
+  formatCustomCommandHelp,
+} from './custom-commands.js';
 import { invalidateSessionCache, getWebDeps } from './web-context.js';
 import {
   getFeishuProviderConfigWithSource,
@@ -1042,9 +1047,92 @@ async function handleCommand(
     case 'sw':
     case 'spawn':
       return handleSpawnCommand(chatJid, rawArgs, chatJid);
-    default:
-      return null;
+    default: {
+      const customResult = await handleCustomCommand(chatJid, cmd, rawArgs);
+      return customResult;
+    }
   }
+}
+
+/**
+ * Try to match a custom command from user-global / per-group Markdown files.
+ * mode='reply': return the expanded template directly.
+ * mode='agent': inject the expanded prompt as a user message to be processed
+ *   by the agent — respecting IM binding (target_agent_id / target_main_jid)
+ *   so the message reaches the correct queue, not the raw IM JID.
+ */
+async function handleCustomCommand(
+  chatJid: string,
+  cmdName: string,
+  rawArgs: string,
+): Promise<string | null> {
+  const group = registeredGroups[chatJid] ?? getRegisteredGroup(chatJid);
+  if (!group) return null;
+
+  const userId = group.created_by;
+  const commands = discoverCommands(userId, group.folder);
+  const cmd = commands.get(cmdName);
+  if (!cmd) return null;
+
+  writeDebugLog('CUSTOM_CMD', `Matched /${cmdName} (mode=${cmd.mode}, source=${cmd.source}) for chatJid=${chatJid}`);
+
+  const expanded = expandTemplate(cmd.bodyTemplate, rawArgs);
+
+  if (cmd.mode === 'reply') {
+    writeDebugLog('CUSTOM_CMD', `Reply mode — returning template (${expanded.length} chars)`);
+    return expanded;
+  }
+
+  // mode='agent': inject the expanded text as a user message into the chat pipeline.
+  // Must resolve the effective JID for IM bindings, same as normal IM message flow.
+  const resolveEff = buildResolveEffectiveChatJid();
+  const resolved = resolveEff(chatJid);
+
+  const targetJid = resolved?.effectiveJid ?? chatJid;
+  const boundAgentId = resolved?.agentId ?? null;
+  const sourceJid = resolved ? chatJid : undefined;
+
+  if (resolved) {
+    writeDebugLog('CUSTOM_CMD', `Agent mode — resolved binding: ${chatJid} → ${targetJid} (agentId=${boundAgentId})`);
+  }
+
+  const now = new Date().toISOString();
+  const messageId = crypto.randomUUID();
+  const user = userId ? getUserById(userId) : undefined;
+  const senderName = user?.display_name || user?.username || 'User';
+
+  writeDebugLog('CUSTOM_CMD', `Agent mode — injecting expanded prompt (${expanded.length} chars) into ${targetJid}`);
+
+  ensureChatExists(targetJid);
+  storeMessageDirect(
+    messageId,
+    targetJid,
+    userId || 'unknown',
+    senderName,
+    expanded,
+    now,
+    false,
+    sourceJid ? { sourceJid } : undefined,
+  );
+  broadcastNewMessage(targetJid, {
+    id: messageId,
+    chat_jid: targetJid,
+    sender: userId || 'unknown',
+    sender_name: senderName,
+    content: expanded,
+    timestamp: now,
+    is_from_me: false,
+  });
+
+  // If bound to a conversation agent, trigger the agent processing loop
+  if (boundAgentId) {
+    const onAgentMsg = buildOnAgentMessage();
+    const baseChatJid = targetJid.split('#agent:')[0];
+    onAgentMsg(baseChatJid, boundAgentId);
+    writeDebugLog('CUSTOM_CMD', `Triggered agent processing for agentId=${boundAgentId}`);
+  }
+
+  return `✅ 已发送 /${cmdName} 命令`;
 }
 
 async function handleClearCommand(chatJid: string): Promise<string> {
@@ -1535,6 +1623,15 @@ function handleHelpCommand(chatJid: string): string {
   lines.push('/require_mention true - 仅 @机器人 时响应');
   lines.push('/require_mention false - 群内所有消息都响应');
   lines.push('/sw <消息> 或 /spawn <消息> - 并行开一个子任务');
+
+  // Append custom commands if any
+  if (group) {
+    const userId = group.created_by;
+    const customCommands = discoverCommands(userId, group.folder);
+    const customHelp = formatCustomCommandHelp(customCommands);
+    if (customHelp) lines.push(customHelp);
+  }
+
   return lines.join('\n');
 }
 
@@ -3896,7 +3993,17 @@ async function runAgent(
       isAdminHome,
       images,
       agentModel: group.default_model || undefined,
+      permissionProfile: group.permissionProfile || undefined,
     };
+
+    if (group.permissionProfile) {
+      if (mainRuntime === 'codex') {
+        writeDebugLog('PERM_PROFILE', `WARNING: permissionProfile set but runtime is codex (unsupported) for ${group.folder} — clearing from containerInput`);
+        containerInput.permissionProfile = undefined;
+      } else {
+        writeDebugLog('PERM_PROFILE', `Injecting permissionProfile for ${group.folder}: allowed=${group.permissionProfile.allowedTools?.length ?? 0}, disallowed=${group.permissionProfile.disallowedTools?.length ?? 0}`);
+      }
+    }
 
     if (mainRuntime === 'codex' && executionMode === 'host') {
       output = await runCodexHostAgent(
@@ -5930,6 +6037,7 @@ async function processAgentConversation(
       agentName: agent.name,
       agentModel: agent.agent_model || undefined,
       images: imagesForAgent,
+      permissionProfile: effectiveGroup.permissionProfile || undefined,
     };
 
     // Write tasks/groups snapshots
@@ -6384,6 +6492,7 @@ async function startMessageLoop(): Promise<void> {
               activeRouteUpdaters.get(group.folder)?.(lastSourceJidForRoute);
             },
             group.default_model || undefined,
+            group.permissionProfile ?? null,
           );
           if (sendResult === 'sent') {
             logger.debug(
@@ -6944,6 +7053,7 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
             imagesForAgent,
             undefined,
             agent?.agent_model || undefined,
+            group.permissionProfile ?? null,
           )
         : 'no_active';
       if (sendResult === 'no_active') {

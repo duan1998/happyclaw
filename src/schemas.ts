@@ -190,6 +190,11 @@ export const ClaudeThirdPartyProfileSecretsSchema = z
     { message: 'At least one secret field must be provided' },
   );
 
+export const PermissionProfileSchema = z.object({
+  allowedTools: z.array(z.string().max(200)).max(100).optional(),
+  disallowedTools: z.array(z.string().max(200)).max(100).optional(),
+}).optional().nullable();
+
 export const GroupPatchSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN).optional(),
   is_pinned: z.boolean().optional(),
@@ -202,6 +207,7 @@ export const GroupPatchSchema = z.object({
     if (val === null) return null;
     return val && val.trim() ? val.trim() : undefined;
   }),
+  permission_profile: PermissionProfileSchema,
 });
 
 export const LoginSchema = z.object({

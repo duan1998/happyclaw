@@ -122,7 +122,9 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
         {section.items.map((g) => (
           <ChatGroupItem
             key={g.jid} jid={g.jid} name={g.name} folder={g.folder}
-            lastMessage={g.lastMessage}            isShared={showCollabBadge ? g.is_shared : undefined}
+            lastMessage={g.lastMessage}
+            permissionProfile={g.permission_profile}
+            isShared={showCollabBadge ? g.is_shared : undefined}
             memberRole={showCollabBadge ? g.member_role : undefined}
             memberCount={showCollabBadge ? g.member_count : undefined}
             isActive={currentGroup === g.jid} isHome={false}
@@ -252,7 +254,9 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                         </div>
                         <ChatGroupItem
                           jid={mainGroup.jid} name={mainGroup.name} folder={mainGroup.folder}
-                          lastMessage={mainGroup.lastMessage}                          isActive={currentGroup === mainGroup.jid} isHome
+                          lastMessage={mainGroup.lastMessage}
+                          permissionProfile={mainGroup.permission_profile}
+                          isActive={currentGroup === mainGroup.jid} isHome
                           isRunning={runnerStates[mainGroup.jid] === 'running'} editable
                           onSelect={handleGroupSelect}
                           onRename={(jid, name) => setRenameState({ open: true, jid, name })}
@@ -270,7 +274,9 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                         {pinnedGroups.map((g) => (
                           <ChatGroupItem
                             key={g.jid} jid={g.jid} name={g.name} folder={g.folder}
-                            lastMessage={g.lastMessage}                            isShared={g.is_shared} memberRole={g.member_role} memberCount={g.member_count}
+                            lastMessage={g.lastMessage}
+                            permissionProfile={g.permission_profile}
+                            isShared={g.is_shared} memberRole={g.member_role} memberCount={g.member_count}
                             isActive={currentGroup === g.jid} isHome={false} isPinned
                             isRunning={runnerStates[g.jid] === 'running'}
                             editable={g.editable} deletable={g.deletable}

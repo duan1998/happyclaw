@@ -3,7 +3,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR, TRUST_PROXY } from './config.js';
+import { DATA_DIR, GROUPS_DIR, TRUST_PROXY } from './config.js';
 
 /**
  * Strip agent-internal XML tags from output text.
@@ -77,7 +77,7 @@ export function getClientIp(c: any): string {
   return connInfo || 'unknown';
 }
 
-/** Create IPC + session directories for an agent. */
+/** Create IPC + session + memory directories for an agent. */
 export function ensureAgentDirectories(
   folder: string,
   agentId: string,
