@@ -39,6 +39,20 @@ import { createMcpTools } from './mcp-tools.js';
 
 // Debug log — must be declared before any log() call
 const DEBUG_LOG_FILE = process.env.HAPPYCLAW_DEBUG_LOG || '';
+const MAX_LOG_LINES = 1000;
+let logLinesSinceLastTruncate = 0;
+
+function truncateDebugLog(): void {
+  if (!DEBUG_LOG_FILE) return;
+  try {
+    const content = fs.readFileSync(DEBUG_LOG_FILE, 'utf-8');
+    const lines = content.split('\n');
+    if (lines.length > MAX_LOG_LINES) {
+      const trimmed = lines.slice(lines.length - MAX_LOG_LINES);
+      fs.writeFileSync(DEBUG_LOG_FILE, trimmed.join('\n'));
+    }
+  } catch { /* non-fatal */ }
+}
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
@@ -46,6 +60,11 @@ function log(message: string): void {
     const ts = new Date().toLocaleString('sv-SE', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }).replace('T', ' ');
     try {
       fs.appendFileSync(DEBUG_LOG_FILE, `[${ts}] [AGENT] ${message}\n`);
+      logLinesSinceLastTruncate++;
+      if (logLinesSinceLastTruncate >= 100) {
+        truncateDebugLog();
+        logLinesSinceLastTruncate = 0;
+      }
     } catch { /* non-fatal */ }
   }
 }
@@ -396,6 +415,142 @@ function isImageMimeMismatchError(msg: string): boolean {
   );
 }
 
+/**
+ * Resolve the session transcript JSONL path for cross-model sanitization.
+ * SDK stores transcripts at: {configDir}/projects/{cwdSlug}/{sessionId}.jsonl
+ * where cwdSlug replaces path separators and colons with dashes.
+ */
+function resolveTranscriptPath(sessionId: string): string | null {
+  const configDir = process.env.CLAUDE_CONFIG_DIR
+    || path.join(process.env.HOME || process.env.USERPROFILE || '/home/node', '.claude');
+  const projectsDir = path.join(configDir, 'projects');
+  if (!fs.existsSync(projectsDir)) return null;
+
+  const jsonlName = `${sessionId}.jsonl`;
+  try {
+    for (const slug of fs.readdirSync(projectsDir)) {
+      const candidate = path.join(projectsDir, slug, jsonlName);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/**
+ * Detect thinking blocks that will be rejected by Claude API.
+ *
+ * Two known failure modes from non-Claude models (e.g. GPT):
+ * 1. Empty thinking: `{ thinking: "" }` → "each thinking block must contain thinking"
+ * 2. Invalid signature: `{ thinking: "...", signature: "" }` → "Invalid signature in thinking block"
+ *
+ * Claude-native thinking blocks always have a non-empty base64 signature.
+ * Any thinking block without a valid-looking signature is unsafe for cross-model resume.
+ */
+function isInvalidThinkingBlock(block: Record<string, unknown>): boolean {
+  if (block.type !== 'thinking') return false;
+  const thinking = block.thinking;
+  const signature = block.signature;
+  if (!thinking || (typeof thinking === 'string' && !thinking.trim())) return true;
+  if (!signature || (typeof signature === 'string' && !signature.trim())) return true;
+  return false;
+}
+
+/**
+ * Sanitize a session transcript JSONL for cross-model resume.
+ *
+ * Non-Claude models produce thinking blocks with empty/invalid signatures
+ * that Claude API rejects. This function strips those blocks.
+ *
+ * Strategy:
+ * 1. Strip invalid thinking blocks from assistant messages.
+ * 2. If an assistant entry's content becomes empty after stripping, remove
+ *    the entire entry and reparent any child that referenced its UUID.
+ * 3. Atomic write (tmp + rename) to prevent data loss.
+ */
+function sanitizeSessionTranscript(sessionId: string): void {
+  const filePath = resolveTranscriptPath(sessionId);
+  if (!filePath) {
+    log(`[sanitize] no transcript file found for session ${sessionId}, skipping`);
+    return;
+  }
+  log(`[sanitize] checking transcript: ${filePath}`);
+
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = content.split('\n');
+    let modified = false;
+    let strippedCount = 0;
+
+    const removedUuidToParent = new Map<string, string>();
+    const linesToRemove = new Set<number>();
+
+    for (let i = 0; i < lines.length; i++) {
+      if (!lines[i].trim()) continue;
+      try {
+        const entry = JSON.parse(lines[i]);
+        if (entry.type !== 'assistant' || !Array.isArray(entry.message?.content)) continue;
+
+        const blocks: Array<Record<string, unknown>> = entry.message.content;
+        const originalLen = blocks.length;
+        const model = entry.message?.model || 'unknown';
+
+        for (const b of blocks) {
+          if (isInvalidThinkingBlock(b)) {
+            const tLen = typeof b.thinking === 'string' ? (b.thinking as string).length : 0;
+            const sLen = typeof b.signature === 'string' ? (b.signature as string).length : 0;
+            log(`[sanitize] stripping invalid thinking block: line=${i} model=${model} thinking_len=${tLen} signature_len=${sLen}`);
+          }
+        }
+
+        const cleaned = blocks.filter((b) => !isInvalidThinkingBlock(b));
+        if (cleaned.length === originalLen) continue;
+        strippedCount += originalLen - cleaned.length;
+
+        if (cleaned.length > 0) {
+          entry.message.content = cleaned;
+          lines[i] = JSON.stringify(entry);
+        } else {
+          linesToRemove.add(i);
+          if (entry.uuid && entry.parentUuid) {
+            removedUuidToParent.set(entry.uuid, entry.parentUuid);
+          }
+          log(`[sanitize] removing empty entry after strip: line=${i} model=${model} uuid=${entry.uuid?.slice(0, 12)}`);
+        }
+        modified = true;
+      } catch { /* skip unparseable lines */ }
+    }
+
+    if (removedUuidToParent.size > 0) {
+      for (let i = 0; i < lines.length; i++) {
+        if (linesToRemove.has(i) || !lines[i].trim()) continue;
+        try {
+          const entry = JSON.parse(lines[i]);
+          if (entry.parentUuid && removedUuidToParent.has(entry.parentUuid)) {
+            let newParent = entry.parentUuid;
+            while (removedUuidToParent.has(newParent)) {
+              newParent = removedUuidToParent.get(newParent)!;
+            }
+            entry.parentUuid = newParent;
+            lines[i] = JSON.stringify(entry);
+          }
+        } catch { /* skip */ }
+      }
+    }
+
+    if (modified) {
+      const outputLines = lines.filter((_, idx) => !linesToRemove.has(idx));
+      const tmp = `${filePath}.tmp`;
+      fs.writeFileSync(tmp, outputLines.join('\n'), 'utf-8');
+      fs.renameSync(tmp, filePath);
+      log(`[sanitize] done: stripped ${strippedCount} invalid thinking blocks, removed ${linesToRemove.size} empty entries (${lines.length} lines → ${outputLines.length} lines)`);
+    } else {
+      log(`[sanitize] transcript clean, no changes needed (${lines.length} lines)`);
+    }
+  } catch (err) {
+    log(`[sanitize] failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function isUnrecoverableTranscriptError(msg: string): boolean {
   const isImageSizeError =
     /image.*dimensions?\s+exceed/i.test(msg) ||
@@ -403,6 +558,13 @@ function isUnrecoverableTranscriptError(msg: string): boolean {
   const isMimeMismatch = isImageMimeMismatchError(msg);
   const isApiReject = /invalid_request_error/i.test(msg);
   return isApiReject && (isImageSizeError || isMimeMismatch);
+}
+
+function isThinkingBlockIncompatibleError(msg: string): boolean {
+  if (!/invalid_request_error/i.test(msg)) return false;
+  return /thinking.*block.*must.*contain.*thinking/i.test(msg) ||
+    /invalid.*signature.*thinking.*block/i.test(msg) ||
+    /thinking.*block.*invalid.*signature/i.test(msg);
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -1525,6 +1687,11 @@ async function runQuery(
         processor.resetFullTextAccumulator();
         return { newSessionId, lastAssistantUuid, closedDuringQuery, contextOverflow: true, interruptedDuringQuery };
       }
+      if (textResult && isThinkingBlockIncompatibleError(textResult)) {
+        log(`Thinking block incompatibility in result (cross-model), will retry with fresh session: ${textResult.slice(0, 200)}`);
+        processor.resetFullTextAccumulator();
+        return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, sessionResumeFailed: true };
+      }
       if (textResult && isUnrecoverableTranscriptError(textResult)) {
         log(`Unrecoverable transcript error in result: ${textResult.slice(0, 200)}`);
         processor.resetFullTextAccumulator();
@@ -1625,6 +1792,11 @@ async function runQuery(
       return { newSessionId, lastAssistantUuid, closedDuringQuery, contextOverflow: true, interruptedDuringQuery };
     }
 
+    // Cross-model thinking block incompatibility: retry with fresh session
+    if (isThinkingBlockIncompatibleError(errorMessage)) {
+      log(`Thinking block incompatibility (cross-model), will retry with fresh session: ${errorMessage.slice(0, 200)}`);
+      return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery, sessionResumeFailed: true };
+    }
     // 检测不可恢复的转录错误
     if (isUnrecoverableTranscriptError(errorMessage)) {
       log(`Unrecoverable transcript error: ${errorMessage}`);
@@ -1768,6 +1940,13 @@ async function main(): Promise<void> {
       try { fs.unlinkSync(IPC_INPUT_INTERRUPT_SENTINEL); } catch { /* ignore */ }
       clearInterruptRequested();
 
+      // Sanitize transcript before any resumed query to fix cross-model
+      // incompatibilities (e.g. empty thinking blocks from GPT that Claude rejects).
+      // This is idempotent and skips writing if nothing needs fixing.
+      if (sessionId) {
+        sanitizeSessionTranscript(sessionId);
+      }
+
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'}, model: ${CLAUDE_MODEL})...`);
 
       const queryResult = await runQuery(
@@ -1789,9 +1968,8 @@ async function main(): Promise<void> {
       if (queryResult.lastAssistantUuid) {
         resumeAt = queryResult.lastAssistantUuid;
       }
-      // Session resume 失败（SDK 无法恢复旧会话）：清除 session，以新会话重试
       if (queryResult.sessionResumeFailed) {
-        log(`Session resume failed, retrying with fresh session (old: ${sessionId})`);
+        log(`[session-fallback] Session resume failed, clearing session and retrying fresh (old session: ${sessionId}, model: ${CLAUDE_MODEL})`);
         sessionId = undefined;
         latestSessionId = undefined;
         resumeAt = undefined;
@@ -2004,7 +2182,7 @@ async function main(): Promise<void> {
           // previously handled by the main loop's `continue` re-entry; now that
           // auto-continue is a standalone call we must check them explicitly).
           if (autoContResult.sessionResumeFailed) {
-            log('WARN: Session resume failed during auto-continue, clearing session');
+            log('[session-fallback] Session resume failed during auto-continue, clearing session');
             sessionId = undefined;
             latestSessionId = undefined;
             resumeAt = undefined;
