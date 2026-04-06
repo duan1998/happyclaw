@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, dialog, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, dialog, nativeImage, session } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const net = require('net');
@@ -89,6 +89,15 @@ function migrateOldData(newDataDir) {
   }
 }
 
+function writeDesktopLog(dataDir, tag, message) {
+  if (!dataDir) return;
+  try {
+    const ts = new Date().toLocaleString('sv', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }).replace('T', ' ');
+    const line = `[${ts}] [${tag}] ${message}\n`;
+    fs.appendFileSync(path.join(dataDir, 'debug.log'), line);
+  } catch {}
+}
+
 function startBackend() {
   const nodePath = getNodePath();
   const entryPoint = getResourcePath('dist', 'index.js');
@@ -104,6 +113,28 @@ function startBackend() {
   console.log(`[Desktop] CWD: ${cwd}`);
   if (dataDir) console.log(`[Desktop] Data dir: ${dataDir}`);
 
+  // Diagnostic: log everything about the desktop environment
+  const agentRunnerCheck = path.join(cwd, 'container', 'agent-runner', 'dist', 'index.js');
+  const agentRunnerNodeModules = path.join(cwd, 'container', 'agent-runner', 'node_modules');
+  const diagLines = [
+    `isDev=${isDev}`,
+    `process.execPath=${process.execPath}`,
+    `process.resourcesPath=${process.resourcesPath || '(undefined)'}`,
+    `nodePath=${nodePath}`,
+    `nodePath exists=${fs.existsSync(nodePath)}`,
+    `entryPoint=${entryPoint}`,
+    `entryPoint exists=${fs.existsSync(entryPoint)}`,
+    `cwd=${cwd}`,
+    `cwd exists=${fs.existsSync(cwd)}`,
+    `agentRunner dist=${agentRunnerCheck}`,
+    `agentRunner dist exists=${fs.existsSync(agentRunnerCheck)}`,
+    `agentRunner node_modules exists=${fs.existsSync(agentRunnerNodeModules)}`,
+    `process.env.PATH (first 500)=${(process.env.PATH || '').slice(0, 500)}`,
+  ];
+  const diagMsg = diagLines.join('\n  ');
+  console.log(`[Desktop] DIAG:\n  ${diagMsg}`);
+  writeDesktopLog(dataDir, 'DESKTOP_DIAG', diagMsg);
+
   const envVars = { ...process.env };
   if (dataDir) envVars.HAPPYCLAW_DATA_DIR = dataDir;
 
@@ -114,13 +145,22 @@ function startBackend() {
   ];
   for (const envFile of envLocations) {
     if (fs.existsSync(envFile)) {
+      console.log(`[Desktop] Loading .env from ${envFile}`);
+      writeDesktopLog(dataDir, 'DESKTOP_ENV', `Loading .env from ${envFile}`);
       const lines = fs.readFileSync(envFile, 'utf-8').split('\n');
       for (const line of lines) {
         const match = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.*)/);
         if (match) {
-          envVars[match[1]] = match[2].replace(/^["']|["']$/g, '').trim();
+          const key = match[1];
+          const val = match[2].replace(/^["']|["']$/g, '').trim();
+          if (key === 'PATH' || key === 'Path') {
+            writeDesktopLog(dataDir, 'DESKTOP_ENV', `WARNING: .env overrides ${key}=${val.slice(0, 300)}`);
+          }
+          envVars[match[1]] = val;
         }
       }
+    } else {
+      writeDesktopLog(dataDir, 'DESKTOP_ENV', `No .env at ${envFile}`);
     }
   }
 
@@ -129,12 +169,20 @@ function startBackend() {
     const bundledGitCmd = path.join(process.resourcesPath, 'mingit', 'cmd');
     const bundledGitExe = path.join(bundledGitCmd, 'git.exe');
     if (fs.existsSync(bundledGitExe)) {
-      envVars.PATH = bundledGitCmd + ';' + (envVars.PATH || '');
+      // Windows env keys are case-insensitive, but {...process.env} produces
+      // a plain object with the original casing (typically "Path" on Windows).
+      // We must find the actual key to avoid creating a duplicate "PATH" that
+      // shadows the real system Path.
+      const pathKey = Object.keys(envVars).find(k => k.toUpperCase() === 'PATH') || 'PATH';
+      envVars[pathKey] = bundledGitCmd + ';' + (envVars[pathKey] || '');
       console.log(`[Desktop] Bundled MinGit found: ${bundledGitExe}`);
     } else {
       console.log(`[Desktop] No bundled MinGit at ${bundledGitExe}, relying on system git`);
     }
   }
+
+  // Final PATH diagnostic
+  writeDesktopLog(dataDir, 'DESKTOP_DIAG', `Final envVars.PATH (first 500)=${(envVars.PATH || envVars.Path || '').slice(0, 500)}`);
 
   serverProcess = spawn(nodePath, [entryPoint], {
     cwd,
@@ -297,6 +345,16 @@ if (!gotLock) {
   });
 
   app.on('ready', async () => {
+    // Clear PWA Service Worker cache and HTTP cache to ensure fresh assets after update.
+    // Without this, Chromium reuses stale SW/cache from previous installs, serving old UI.
+    try {
+      await session.defaultSession.clearStorageData({ storages: ['serviceworkers', 'cachestorage'] });
+      await session.defaultSession.clearCache();
+      console.log('[Desktop] Cleared SW + HTTP cache');
+    } catch (err) {
+      console.warn('[Desktop] Cache clear failed:', err.message);
+    }
+
     createTray();
 
     const alreadyRunning = await isPortInUse(PORT);

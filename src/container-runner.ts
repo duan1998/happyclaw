@@ -1036,6 +1036,7 @@ export async function runHostAgent(
   const hostEnv: Record<string, string> = {
     ...(process.env as Record<string, string>),
   };
+  const originalPath = hostEnv['PATH'] || hostEnv['Path'] || '';
 
   // ─── Provider Pool selection (host mode) ───
   const containerOverride = getContainerEnvConfig(group.folder);
@@ -1050,11 +1051,19 @@ export async function runHostAgent(
       containerOverride,
       hostPoolResult?.resolved.customEnv,
     );
+    const envKeysOverridden: string[] = [];
     for (const line of envLines) {
       const eqIdx = line.indexOf('=');
       if (eqIdx > 0) {
-        hostEnv[line.slice(0, eqIdx)] = line.slice(eqIdx + 1);
+        const key = line.slice(0, eqIdx);
+        hostEnv[key] = line.slice(eqIdx + 1);
+        envKeysOverridden.push(key);
       }
+    }
+    // Detect if env config overwrote PATH
+    const currentPath = hostEnv['PATH'] || hostEnv['Path'] || '';
+    if (currentPath !== originalPath) {
+      writeDebugLog('SPAWN_DIAG', `WARNING: env config overwrote PATH!\n  original(first 300)=${originalPath.slice(0, 300)}\n  current(first 300)=${currentPath.slice(0, 300)}\n  overridden keys=${envKeysOverridden.join(',')}`);
     }
 
     // Write .credentials.json for OAuth credentials
@@ -1173,6 +1182,21 @@ export async function runHostAgent(
     } catch {
       // Best effort, don't block execution
     }
+
+    // Diagnostic: log all spawn-critical paths for ENOENT debugging
+    const nodeResolved = hostEnv['PATH']
+      ? undefined // will rely on PATH
+      : '(no PATH in hostEnv!)';
+    writeDebugLog('SPAWN_DIAG', [
+      `group=${group.name} folder=${group.folder}`,
+      `process.cwd()=${process.cwd()}`,
+      `agentRunnerDist=${agentRunnerDist}`,
+      `agentRunnerDist exists=${fs.existsSync(agentRunnerDist)}`,
+      `cwd(groupDir)=${groupDir}`,
+      `groupDir exists=${fs.existsSync(groupDir)}`,
+      `hostEnv.PATH=${(hostEnv['PATH'] || hostEnv['Path'] || '(none)').slice(0, 500)}`,
+      `nodeResolved=${nodeResolved ?? 'via PATH'}`,
+    ].join('\n  '));
 
     logger.info(
       {
@@ -1298,8 +1322,18 @@ export async function runHostAgent(
         handleSuccessClose(closeCtx, duration);
       });
 
-      proc.on('error', (err) => {
+      proc.on('error', (err: NodeJS.ErrnoException) => {
         clearTimeout(timeout);
+        writeDebugLog('SPAWN_ERROR', [
+          `group=${group.name} folder=${group.folder}`,
+          `err.message=${err.message}`,
+          `err.code=${err.code}`,
+          `err.errno=${err.errno}`,
+          `err.syscall=${err.syscall}`,
+          `err.path=${(err as any).path}`,
+          `spawn args=['node', '${agentRunnerDist}']`,
+          `spawn cwd=${groupDir}`,
+        ].join('\n  '));
         logger.error(
           { group: group.name, processId, error: err },
           'Host agent spawn error',

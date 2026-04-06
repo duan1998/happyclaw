@@ -37,8 +37,17 @@ import { StreamEventProcessor } from './stream-processor.js';
 import { loadAllAgents } from './agent-definitions.js';
 import { createMcpTools } from './mcp-tools.js';
 
+// Earliest possible survival signal — write to debug.log before any import could fail
+const _earlyDebugLog = process.env.HAPPYCLAW_DEBUG_LOG || '';
+if (_earlyDebugLog) {
+  try {
+    const ts = new Date().toLocaleString('sv-SE', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }).replace('T', ' ');
+    fs.appendFileSync(_earlyDebugLog, `[${ts}] [AGENT_ALIVE] agent-runner process started pid=${process.pid} cwd=${process.cwd()} execPath=${process.execPath} argv=${JSON.stringify(process.argv)}\n`);
+  } catch {}
+}
+
 // Debug log — must be declared before any log() call
-const DEBUG_LOG_FILE = process.env.HAPPYCLAW_DEBUG_LOG || '';
+const DEBUG_LOG_FILE = _earlyDebugLog;
 const MAX_LOG_LINES = 1000;
 let logLinesSinceLastTruncate = 0;
 
@@ -68,6 +77,15 @@ function log(message: string): void {
     } catch { /* non-fatal */ }
   }
 }
+
+// Catch any crash early and log it
+process.on('uncaughtException', (err) => {
+  log(`UNCAUGHT_EXCEPTION: ${err.stack || err.message}`);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  log(`UNHANDLED_REJECTION: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}`);
+});
 
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP = process.env.HAPPYCLAW_WORKSPACE_GROUP || '/workspace/group';
