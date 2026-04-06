@@ -621,9 +621,10 @@ export async function revertFile(
   const folder = existing.group_folder;
   const gitDir = getShadowGitDir(folder);
 
+  const targetCommit = existing.pre_commit;
   writeDebugLog(
     TAG,
-    `revertFile: record=${recordId} file=${filePath} commit=${existing.post_commit.slice(0, 8)}`,
+    `revertFile: record=${recordId} file=${filePath} targetCommit=${targetCommit.slice(0, 8)} (pre_commit, undoing this record's change)`,
   );
 
   return withFolderLock(folder, async () => {
@@ -634,24 +635,32 @@ export async function revertFile(
 
       const preHash = await _takeSnapshot(folder, workDir, `pre-revert-file:${filePath}`);
 
+      const normalizedPath = filePath.replace(/\\/g, '/');
       const { exitCode: checkExit } = await gitCmdAllowFailure(gitDir, workDir, [
-        'cat-file', '-e', `${existing.post_commit}:${filePath.replace(/\\/g, '/')}`,
+        'cat-file', '-e', `${targetCommit}:${normalizedPath}`,
       ]);
+      writeDebugLog(
+        TAG,
+        `revertFile: cat-file ${targetCommit.slice(0, 8)}:${normalizedPath} exitCode=${checkExit}`,
+      );
 
       const targetFilePath = path.join(workDir, filePath);
       if (checkExit === 0) {
         await gitCmd(gitDir, workDir, [
-          'checkout', existing.post_commit, '--', filePath.replace(/\\/g, '/'),
+          'checkout', targetCommit, '--', normalizedPath,
         ]);
+        writeDebugLog(TAG, `revertFile: checked out ${normalizedPath} from ${targetCommit.slice(0, 8)}`);
       } else {
         if (fs.existsSync(targetFilePath)) {
           fs.unlinkSync(targetFilePath);
-          writeDebugLog(TAG, `revertFile: deleted ${filePath} (not in target commit)`);
+          writeDebugLog(TAG, `revertFile: deleted ${filePath} (not in target commit ${targetCommit.slice(0, 8)})`);
+        } else {
+          writeDebugLog(TAG, `revertFile: ${filePath} already absent, nothing to do`);
         }
       }
 
       await gitCmd(gitDir, workDir, ['add', '-A']);
-      const msg = `revert-file ${filePath} to ${existing.post_commit.slice(0, 8)}`;
+      const msg = `revert-file ${filePath} to ${targetCommit.slice(0, 8)} (undo record ${recordId.slice(0, 8)})`;
       await gitCmd(gitDir, workDir, ['commit', '-m', msg, '--allow-empty']);
 
       const { stdout } = await gitCmd(gitDir, workDir, ['rev-parse', 'HEAD']);

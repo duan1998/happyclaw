@@ -290,9 +290,9 @@ function DetailView({
         open={!!fileRevertTarget}
         onClose={() => setFileRevertTarget(null)}
         onConfirm={handleFileRevert}
-        title="恢复文件"
-        message={`将 ${fileRevertTarget} 恢复到此次变更完成后的版本。仅影响该文件，其他文件不变。`}
-        confirmText="恢复"
+        title="撤销文件变更"
+        message={`将 ${fileRevertTarget} 恢复到此次变更之前的状态（撤销此记录对该文件的改动）。仅影响该文件，其他文件不变。`}
+        confirmText="撤销"
         confirmVariant="danger"
         loading={!!revertingFile}
       />
