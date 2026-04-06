@@ -1060,10 +1060,12 @@ export async function runHostAgent(
         envKeysOverridden.push(key);
       }
     }
-    // Detect if env config overwrote PATH
     const currentPath = hostEnv['PATH'] || hostEnv['Path'] || '';
     if (currentPath !== originalPath) {
-      writeDebugLog('SPAWN_DIAG', `WARNING: env config overwrote PATH!\n  original(first 300)=${originalPath.slice(0, 300)}\n  current(first 300)=${currentPath.slice(0, 300)}\n  overridden keys=${envKeysOverridden.join(',')}`);
+      writeDebugLog(
+        'SPAWN_ERROR',
+        `Host env PATH overridden by config for folder=${group.folder}\n  original(first 300)=${originalPath.slice(0, 300)}\n  current(first 300)=${currentPath.slice(0, 300)}\n  overridden keys=${envKeysOverridden.join(',')}`,
+      );
     }
 
     // Write .credentials.json for OAuth credentials
@@ -1182,21 +1184,6 @@ export async function runHostAgent(
     } catch {
       // Best effort, don't block execution
     }
-
-    // Diagnostic: log all spawn-critical paths for ENOENT debugging
-    const nodeResolved = hostEnv['PATH']
-      ? undefined // will rely on PATH
-      : '(no PATH in hostEnv!)';
-    writeDebugLog('SPAWN_DIAG', [
-      `group=${group.name} folder=${group.folder}`,
-      `process.cwd()=${process.cwd()}`,
-      `agentRunnerDist=${agentRunnerDist}`,
-      `agentRunnerDist exists=${fs.existsSync(agentRunnerDist)}`,
-      `cwd(groupDir)=${groupDir}`,
-      `groupDir exists=${fs.existsSync(groupDir)}`,
-      `hostEnv.PATH=${(hostEnv['PATH'] || hostEnv['Path'] || '(none)').slice(0, 500)}`,
-      `nodeResolved=${nodeResolved ?? 'via PATH'}`,
-    ].join('\n  '));
 
     logger.info(
       {

@@ -8098,16 +8098,7 @@ async function main(): Promise<void> {
     handleSpawnCommand,
   });
 
-  writeDebugLog('SERVICE', [
-    `Backend started (port=${process.env.WEB_PORT || 3000})`,
-    `process.cwd()=${process.cwd()}`,
-    `process.execPath=${process.execPath}`,
-    `process.argv=${JSON.stringify(process.argv)}`,
-    `process.env.PATH (first 500)=${(process.env.PATH || process.env.Path || '').slice(0, 500)}`,
-    `process.env.HAPPYCLAW_DATA_DIR=${process.env.HAPPYCLAW_DATA_DIR || '(not set)'}`,
-    `__dirname equivalent=${path.dirname(new URL(import.meta.url).pathname)}`,
-    `container/agent-runner exists=${fs.existsSync(path.join(process.cwd(), 'container', 'agent-runner', 'dist', 'index.js'))}`,
-  ].join('\n  '));
+  writeDebugLog('SERVICE', `Backend started (port=${process.env.WEB_PORT || 3000})`);
 
   // Clean expired sessions every hour
   setInterval(

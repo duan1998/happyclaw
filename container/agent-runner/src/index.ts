@@ -37,17 +37,8 @@ import { StreamEventProcessor } from './stream-processor.js';
 import { loadAllAgents } from './agent-definitions.js';
 import { createMcpTools } from './mcp-tools.js';
 
-// Earliest possible survival signal — write to debug.log before any import could fail
-const _earlyDebugLog = process.env.HAPPYCLAW_DEBUG_LOG || '';
-if (_earlyDebugLog) {
-  try {
-    const ts = new Date().toLocaleString('sv-SE', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }).replace('T', ' ');
-    fs.appendFileSync(_earlyDebugLog, `[${ts}] [AGENT_ALIVE] agent-runner process started pid=${process.pid} cwd=${process.cwd()} execPath=${process.execPath} argv=${JSON.stringify(process.argv)}\n`);
-  } catch {}
-}
-
 // Debug log — must be declared before any log() call
-const DEBUG_LOG_FILE = _earlyDebugLog;
+const DEBUG_LOG_FILE = process.env.HAPPYCLAW_DEBUG_LOG || '';
 const MAX_LOG_LINES = 1000;
 let logLinesSinceLastTruncate = 0;
 
