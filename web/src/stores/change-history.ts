@@ -74,8 +74,8 @@ export const useChangeHistoryStore = create<ChangeHistoryState>((set, get) => ({
         records: { ...s.records, [jid]: data.records },
         loading: false,
       }));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to load change history';
+    } catch (err: any) {
+      const msg = err?.message || '加载变更历史失败';
       console.error('[change-history] loadRecords FAIL', err);
       set({ loading: false, error: msg });
     }
@@ -105,8 +105,8 @@ export const useChangeHistoryStore = create<ChangeHistoryState>((set, get) => ({
       );
       console.debug('[change-history] loadDiff OK', data.diff.length, 'bytes');
       set({ diff: data.diff, diffLoading: false });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to load diff';
+    } catch (err: any) {
+      const msg = err?.message || 'Diff 加载失败';
       console.error('[change-history] loadDiff FAIL', err);
       set({ diffLoading: false, diff: null, diffError: msg });
     }
@@ -120,12 +120,11 @@ export const useChangeHistoryStore = create<ChangeHistoryState>((set, get) => ({
         `/api/groups/${encodeURIComponent(jid)}/change-history/${recordId}/revert`,
       );
       console.debug('[change-history] revertRecord OK', data);
-      // Refresh the list after revert
       await get().loadRecords(jid);
       set({ reverting: false });
       return { ok: true };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Revert failed';
+    } catch (err: any) {
+      const msg = err?.message || (err instanceof Error ? err.message : '还原失败');
       console.error('[change-history] revertRecord FAIL', err);
       set({ reverting: false });
       return { ok: false, error: msg };
@@ -145,8 +144,8 @@ export const useChangeHistoryStore = create<ChangeHistoryState>((set, get) => ({
       await get().loadDetail(jid, recordId);
       set({ revertingFile: null });
       return { ok: true };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Revert file failed';
+    } catch (err: any) {
+      const msg = err?.message || (err instanceof Error ? err.message : '文件恢复失败');
       console.error('[change-history] revertFile FAIL', err);
       set({ revertingFile: null });
       return { ok: false, error: msg };

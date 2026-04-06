@@ -560,37 +560,40 @@ export async function revertChangeRecord(
     `revertChangeRecord: reverting ${id} to post=${existing.post_commit.slice(0, 8)} workDir=${workDir}`,
   );
 
-  const preRevertHash = await takeSnapshot(
-    existing.group_folder,
-    workDir,
-    `pre-revert:${id.slice(0, 8)}`,
-  );
-
-  const newHash = await revertToCommit(
-    existing.group_folder,
-    workDir,
-    existing.post_commit,
-  );
-  if (!newHash) {
-    return { ok: false, error: 'Git revert failed' };
-  }
-
-  if (preRevertHash) {
-    const revertRecord = await recordChange(
-      existing.group_folder,
+  const folder = existing.group_folder;
+  return withFolderLock(folder, async () => {
+    const preRevertHash = await _takeSnapshot(
+      folder,
       workDir,
-      preRevertHash,
-      newHash,
-      { turnId: `revert:${id.slice(0, 8)}` },
+      `pre-revert:${id.slice(0, 8)}`,
     );
-    if (revertRecord) {
-      writeDebugLog(TAG, `revertChangeRecord OK: new record=${revertRecord.id}`);
-      return { ok: true, record: revertRecord };
-    }
-  }
 
-  writeDebugLog(TAG, `revertChangeRecord OK (no new record needed)`);
-  return { ok: true };
+    const newHash = await _revertToCommit(
+      folder,
+      workDir,
+      existing.post_commit,
+    );
+    if (!newHash) {
+      return { ok: false, error: 'Git revert failed' };
+    }
+
+    if (preRevertHash) {
+      const revertRecord = await recordChange(
+        folder,
+        workDir,
+        preRevertHash,
+        newHash,
+        { turnId: `revert:${id.slice(0, 8)}` },
+      );
+      if (revertRecord) {
+        writeDebugLog(TAG, `revertChangeRecord OK: new record=${revertRecord.id}`);
+        return { ok: true, record: revertRecord };
+      }
+    }
+
+    writeDebugLog(TAG, `revertChangeRecord OK (no new record needed)`);
+    return { ok: true };
+  });
 }
 
 /**
