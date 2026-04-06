@@ -504,10 +504,20 @@ export function getRecord(id: string): ChangeRecord | undefined {
 }
 
 /**
- * Revert a specific change record — restores the workspace to the pre-commit state
- * and creates a new change_record capturing the revert itself.
- *
- * Resolves workDir from the registered group's customCwd (Critical fix #1).
+ * Resolve workDir for a change record's group_folder.
+ */
+function resolveRecordWorkDir(groupFolder: string): string | null {
+  if (groupFolder.includes('..')) return null;
+  const group = dbGetRegisteredGroup(`web:${groupFolder}`);
+  const workDir = group?.customCwd
+    ? resolveWorkDir({ folder: groupFolder, customCwd: group.customCwd })
+    : path.join(GROUPS_DIR, groupFolder);
+  return fs.existsSync(workDir) ? workDir : null;
+}
+
+/**
+ * Restore workspace to the state after a specific change record (post_commit).
+ * Creates a new change_record capturing the revert itself.
  */
 export async function revertChangeRecord(
   id: string,
@@ -518,30 +528,15 @@ export async function revertChangeRecord(
     return { ok: false, error: 'Change record not found' };
   }
 
-  if (existing.group_folder.includes('..')) {
-    writeDebugLog(TAG, `revertChangeRecord: path traversal rejected: ${existing.group_folder}`);
-    return { ok: false, error: 'Invalid group folder' };
-  }
-
-  // Look up the registered group to get customCwd (Critical fix #1)
-  const groupEntries = dbGetRegisteredGroup(
-    `web:${existing.group_folder}`,
-  );
-  const workDir = groupEntries?.customCwd
-    ? resolveWorkDir({ folder: existing.group_folder, customCwd: groupEntries.customCwd })
-    : path.join(GROUPS_DIR, existing.group_folder);
-
-  if (!fs.existsSync(workDir)) {
-    writeDebugLog(
-      TAG,
-      `revertChangeRecord: workDir not found: ${workDir}`,
-    );
+  const workDir = resolveRecordWorkDir(existing.group_folder);
+  if (!workDir) {
+    writeDebugLog(TAG, `revertChangeRecord: workDir not found for ${existing.group_folder}`);
     return { ok: false, error: 'Workspace directory not found' };
   }
 
   writeDebugLog(
     TAG,
-    `revertChangeRecord: reverting ${id} to pre=${existing.pre_commit.slice(0, 8)} workDir=${workDir}`,
+    `revertChangeRecord: reverting ${id} to post=${existing.post_commit.slice(0, 8)} workDir=${workDir}`,
   );
 
   const preRevertHash = await takeSnapshot(
@@ -553,7 +548,7 @@ export async function revertChangeRecord(
   const newHash = await revertToCommit(
     existing.group_folder,
     workDir,
-    existing.pre_commit,
+    existing.post_commit,
   );
   if (!newHash) {
     return { ok: false, error: 'Git revert failed' };
@@ -568,16 +563,96 @@ export async function revertChangeRecord(
       { turnId: `revert:${id.slice(0, 8)}` },
     );
     if (revertRecord) {
-      writeDebugLog(
-        TAG,
-        `revertChangeRecord OK: new record=${revertRecord.id}`,
-      );
+      writeDebugLog(TAG, `revertChangeRecord OK: new record=${revertRecord.id}`);
       return { ok: true, record: revertRecord };
     }
   }
 
   writeDebugLog(TAG, `revertChangeRecord OK (no new record needed)`);
   return { ok: true };
+}
+
+/**
+ * Restore a single file to its state in a specific change record (post_commit).
+ * Creates a new change_record capturing the file restore.
+ */
+export async function revertFile(
+  recordId: string,
+  filePath: string,
+): Promise<{ ok: boolean; error?: string; record?: ChangeRecord }> {
+  const existing = dbGetChangeRecordById(recordId);
+  if (!existing) {
+    writeDebugLog(TAG, `revertFile: record ${recordId} not found`);
+    return { ok: false, error: 'Change record not found' };
+  }
+
+  const workDir = resolveRecordWorkDir(existing.group_folder);
+  if (!workDir) {
+    writeDebugLog(TAG, `revertFile: workDir not found for ${existing.group_folder}`);
+    return { ok: false, error: 'Workspace directory not found' };
+  }
+
+  if (filePath.includes('..') || path.isAbsolute(filePath)) {
+    writeDebugLog(TAG, `revertFile: path traversal rejected: ${filePath}`);
+    return { ok: false, error: 'Invalid file path' };
+  }
+
+  const folder = existing.group_folder;
+  const gitDir = getShadowGitDir(folder);
+
+  writeDebugLog(
+    TAG,
+    `revertFile: record=${recordId} file=${filePath} commit=${existing.post_commit.slice(0, 8)}`,
+  );
+
+  return withFolderLock(folder, async () => {
+    try {
+      if (!(await checkGitAvailable())) {
+        return { ok: false, error: 'Git not available' };
+      }
+
+      const preHash = await _takeSnapshot(folder, workDir, `pre-revert-file:${filePath}`);
+
+      const { exitCode: checkExit } = await gitCmdAllowFailure(gitDir, workDir, [
+        'cat-file', '-e', `${existing.post_commit}:${filePath.replace(/\\/g, '/')}`,
+      ]);
+
+      const targetFilePath = path.join(workDir, filePath);
+      if (checkExit === 0) {
+        await gitCmd(gitDir, workDir, [
+          'checkout', existing.post_commit, '--', filePath.replace(/\\/g, '/'),
+        ]);
+      } else {
+        if (fs.existsSync(targetFilePath)) {
+          fs.unlinkSync(targetFilePath);
+          writeDebugLog(TAG, `revertFile: deleted ${filePath} (not in target commit)`);
+        }
+      }
+
+      await gitCmd(gitDir, workDir, ['add', '-A']);
+      const msg = `revert-file ${filePath} to ${existing.post_commit.slice(0, 8)}`;
+      await gitCmd(gitDir, workDir, ['commit', '-m', msg, '--allow-empty']);
+
+      const { stdout } = await gitCmd(gitDir, workDir, ['rev-parse', 'HEAD']);
+      const postHash = stdout.trim();
+
+      if (preHash && preHash !== postHash) {
+        const rec = await recordChange(folder, workDir, preHash, postHash, {
+          turnId: `revert-file:${recordId.slice(0, 8)}:${filePath}`,
+        });
+        if (rec) {
+          writeDebugLog(TAG, `revertFile OK: new record=${rec.id}`);
+          return { ok: true, record: rec };
+        }
+      }
+
+      writeDebugLog(TAG, `revertFile OK (no change recorded)`);
+      return { ok: true };
+    } catch (err: any) {
+      writeDebugLog(TAG, `revertFile FAIL: ${err.message}`);
+      return { ok: false, error: err.message };
+    }
+  });
 }
 
 export function cleanupFolder(folder: string): void {

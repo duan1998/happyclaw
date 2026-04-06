@@ -117,14 +117,17 @@ function DetailView({
     diffRecordId,
     diffError,
     reverting,
+    revertingFile,
     loadDetail,
     loadDiff,
     revertRecord,
+    revertFile,
     clearDiff,
   } = useChangeHistoryStore();
 
   const [showRevertConfirm, setShowRevertConfirm] = useState(false);
   const [showDiff, setShowDiff] = useState(false);
+  const [fileRevertTarget, setFileRevertTarget] = useState<string | null>(null);
 
   useEffect(() => {
     console.debug('[change-history-ui] loadDetail', record.id);
@@ -143,12 +146,24 @@ function DetailView({
     const result = await revertRecord(groupJid, record.id);
     setShowRevertConfirm(false);
     if (result.ok) {
-      toast.success('已还原到变更前状态');
+      toast.success('已还原到此刻状态');
       onBack();
     } else {
       toast.error(result.error || '还原失败');
     }
   }, [groupJid, record.id, revertRecord, onBack]);
+
+  const handleFileRevert = useCallback(async () => {
+    if (!fileRevertTarget) return;
+    console.debug('[change-history-ui] revertFile', record.id, fileRevertTarget);
+    const result = await revertFile(groupJid, record.id, fileRevertTarget);
+    setFileRevertTarget(null);
+    if (result.ok) {
+      toast.success(`已恢复 ${fileRevertTarget}`);
+    } else {
+      toast.error(result.error || '恢复失败');
+    }
+  }, [groupJid, record.id, fileRevertTarget, revertFile]);
 
   if (showDiff && (diff !== null || diffError)) {
     return (
@@ -219,7 +234,7 @@ function DetailView({
             onClick={() => setShowRevertConfirm(true)}
           >
             <Undo2 className="w-3.5 h-3.5" />
-            还原
+            还原到此刻
           </Button>
         </div>
       </div>
@@ -236,11 +251,24 @@ function DetailView({
           <div className="divide-y divide-border">
             {detailFiles.map((f, i) => {
               const sl = statusLabel(f.status);
+              const isReverting = revertingFile === f.path;
               return (
-                <div key={i} className="flex items-center gap-2 px-4 py-2 text-xs">
+                <div key={i} className="flex items-center gap-2 px-4 py-2 text-xs group">
                   <span className={`font-medium ${sl.color} w-8 flex-shrink-0`}>{sl.text}</span>
                   <FileText className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
-                  <span className="truncate text-foreground" title={f.path}>{f.path}</span>
+                  <span className="truncate text-foreground flex-1 min-w-0" title={f.path}>{f.path}</span>
+                  <button
+                    className="flex-shrink-0 text-[11px] text-orange-500 hover:text-orange-600 opacity-0 group-hover:opacity-100 transition-opacity disabled:opacity-50"
+                    disabled={isReverting}
+                    onClick={() => setFileRevertTarget(f.path)}
+                    title="恢复此文件到此版本"
+                  >
+                    {isReverting ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Undo2 className="w-3 h-3" />
+                    )}
+                  </button>
                 </div>
               );
             })}
@@ -252,11 +280,21 @@ function DetailView({
         open={showRevertConfirm}
         onClose={() => setShowRevertConfirm(false)}
         onConfirm={handleRevert}
-        title="还原变更"
-        message={`将把工作区文件还原到此次变更之前的状态（${record.files_changed} 个文件）。此操作本身也会被记录，支持再次还原。`}
+        title="还原到此刻"
+        message={`将工作区恢复到此次变更完成后的状态。此刻之后的所有改动将丢失（${record.files_changed} 个文件）。操作本身会被记录，支持再次还原。`}
         confirmText="还原"
         confirmVariant="danger"
         loading={reverting}
+      />
+      <ConfirmDialog
+        open={!!fileRevertTarget}
+        onClose={() => setFileRevertTarget(null)}
+        onConfirm={handleFileRevert}
+        title="恢复文件"
+        message={`将 ${fileRevertTarget} 恢复到此次变更完成后的版本。仅影响该文件，其他文件不变。`}
+        confirmText="恢复"
+        confirmVariant="danger"
+        loading={!!revertingFile}
       />
     </div>
   );

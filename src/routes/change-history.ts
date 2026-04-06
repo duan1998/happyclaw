@@ -10,6 +10,7 @@ import {
   getFullDiff,
   listChangedFiles,
   revertChangeRecord,
+  revertFile,
   resolveWorkDir,
 } from '../change-history.js';
 
@@ -151,6 +152,52 @@ router.post(
       TAG,
       `revert OK: newRecord=${result.record?.id ?? 'none'}`,
     );
+    return c.json({ ok: true, revertRecord: result.record || null });
+  },
+);
+
+// POST /:jid/change-history/:recordId/revert-file — revert a single file
+router.post(
+  '/:jid/change-history/:recordId/revert-file',
+  authMiddleware,
+  async (c) => {
+    const jid = decodeURIComponent(c.req.param('jid'));
+    const recordId = c.req.param('recordId');
+    const user = c.get('user');
+
+    const body = await c.req.json<{ filePath?: string }>().catch(() => ({} as { filePath?: string }));
+    const filePath = body.filePath;
+    if (!filePath || typeof filePath !== 'string') {
+      return c.json({ error: 'filePath is required' }, 400);
+    }
+
+    writeDebugLog(TAG, `POST revert-file jid=${jid} id=${recordId} file=${filePath} user=${user.id}`);
+
+    const group = getRegisteredGroup(jid);
+    if (!group) return c.json({ error: 'Group not found' }, 404);
+    if (!canAccessGroup(user, { ...group, jid }))
+      return c.json({ error: 'Forbidden' }, 403);
+
+    const deps = getWebDeps();
+    if (deps?.queue.isGroupActive(jid)) {
+      writeDebugLog(TAG, `revert-file rejected: agent running on ${jid}`);
+      return c.json(
+        { error: 'Agent 正在运行中，请等待执行完成后再还原' },
+        409,
+      );
+    }
+
+    const record = getRecord(recordId);
+    if (!record || record.group_folder !== group.folder)
+      return c.json({ error: 'Record not found' }, 404);
+
+    const result = await revertFile(recordId, filePath);
+    if (!result.ok) {
+      writeDebugLog(TAG, `revert-file FAILED: ${result.error}`);
+      return c.json({ error: result.error }, 500);
+    }
+
+    writeDebugLog(TAG, `revert-file OK: newRecord=${result.record?.id ?? 'none'}`);
     return c.json({ ok: true, revertRecord: result.record || null });
   },
 );

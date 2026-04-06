@@ -34,11 +34,13 @@ interface ChangeHistoryState {
   diffError: string | null;
 
   reverting: boolean;
+  revertingFile: string | null;
 
   loadRecords: (jid: string, offset?: number) => Promise<void>;
   loadDetail: (jid: string, recordId: string) => Promise<void>;
   loadDiff: (jid: string, recordId: string) => Promise<void>;
   revertRecord: (jid: string, recordId: string) => Promise<{ ok: boolean; error?: string }>;
+  revertFile: (jid: string, recordId: string, filePath: string) => Promise<{ ok: boolean; error?: string }>;
   clearDetail: () => void;
   clearDiff: () => void;
 }
@@ -58,6 +60,7 @@ export const useChangeHistoryStore = create<ChangeHistoryState>((set, get) => ({
   diffError: null,
 
   reverting: false,
+  revertingFile: null,
 
   loadRecords: async (jid, offset = 0) => {
     set({ loading: true, error: null });
@@ -125,6 +128,27 @@ export const useChangeHistoryStore = create<ChangeHistoryState>((set, get) => ({
       const msg = err instanceof Error ? err.message : 'Revert failed';
       console.error('[change-history] revertRecord FAIL', err);
       set({ reverting: false });
+      return { ok: false, error: msg };
+    }
+  },
+
+  revertFile: async (jid, recordId, filePath) => {
+    set({ revertingFile: filePath });
+    console.debug('[change-history] revertFile', { jid, recordId, filePath });
+    try {
+      const data = await api.post<{ ok: boolean; error?: string }>(
+        `/api/groups/${encodeURIComponent(jid)}/change-history/${recordId}/revert-file`,
+        { filePath },
+      );
+      console.debug('[change-history] revertFile OK', data);
+      await get().loadRecords(jid);
+      await get().loadDetail(jid, recordId);
+      set({ revertingFile: null });
+      return { ok: true };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Revert file failed';
+      console.error('[change-history] revertFile FAIL', err);
+      set({ revertingFile: null });
       return { ok: false, error: msg };
     }
   },
