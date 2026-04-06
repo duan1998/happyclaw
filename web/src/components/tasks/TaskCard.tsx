@@ -6,6 +6,7 @@ import {
   ExternalLink,
   Pause,
   Play,
+  RotateCcw,
   Trash2,
   Zap,
 } from 'lucide-react';
@@ -70,6 +71,11 @@ export function TaskCard({
     } else {
       onResume(task.id);
     }
+  };
+
+  const handleReactivate = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onResume(task.id);
   };
 
   const handleRunNow = async (e: React.MouseEvent) => {
@@ -160,7 +166,7 @@ export function TaskCard({
 
             {/* Run Now */}
             {onRunNow &&
-              (task.status === 'active' || task.status === 'paused') && (
+              (task.status === 'active' || task.status === 'paused' || task.status === 'completed') && (
                 <button
                   onClick={handleRunNow}
                   disabled={runningNow}
@@ -173,6 +179,18 @@ export function TaskCard({
                   />
                 </button>
               )}
+
+            {/* Reactivate completed task */}
+            {task.status === 'completed' && (
+              <button
+                onClick={handleReactivate}
+                className="p-2 text-muted-foreground hover:text-green-600 dark:hover:text-green-400 hover:bg-green-50 dark:hover:bg-green-950/40 rounded-lg transition-colors cursor-pointer"
+                title="重新启用"
+                aria-label="重新启用任务"
+              >
+                <RotateCcw className="w-5 h-5" />
+              </button>
+            )}
 
             {/* Pause/Resume */}
             {(task.status === 'active' || task.status === 'paused') && (

@@ -62,19 +62,26 @@ describe('formatGroupDeleteConflictMessage', () => {
   });
 
   test('keeps main-conversation-only conflicts readable', () => {
-    expect(
-      formatGroupDeleteConflictMessage({
-        boundAgents: [],
-        boundMainImGroups: [{ name: 'Telegram Ops' }],
-      }),
-    ).toBe(
-      '该工作区绑定了 IM 渠道，请先解绑后再删除：\n主对话: Telegram Ops',
-    );
+    const msg = formatGroupDeleteConflictMessage({
+      boundAgents: [],
+      boundMainImGroups: [{ name: 'Telegram Ops' }],
+    });
+    expect(msg).toContain('主对话: Telegram Ops');
+    expect(msg).toContain('强制删除将自动解绑以上关联');
+  });
+
+  test('includes task bindings in conflict message', () => {
+    const msg = formatGroupDeleteConflictMessage({
+      boundTasks: [{ id: 't1', prompt: '每日汇总', status: 'active' }],
+    });
+    expect(msg).toContain('定时任务');
+    expect(msg).toContain('每日汇总');
+    expect(msg).toContain('运行中');
   });
 
   test('falls back to a generic message when details are missing', () => {
     expect(formatGroupDeleteConflictMessage({})).toBe(
-      '该工作区绑定了 IM 渠道，请先解绑后再删除。',
+      '该工作区存在绑定关系，请确认后删除。',
     );
   });
 });

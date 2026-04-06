@@ -1,5 +1,5 @@
-import { useState, useMemo, useEffect } from 'react';
-import { Loader2, FolderOpen, MessageSquare, RotateCcw } from 'lucide-react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
+import { Loader2, ChevronRight, FolderOpen, Folder, MessageSquare, RotateCcw } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -32,11 +32,24 @@ export function BindingTargetDialog({
   selecting,
 }: BindingTargetDialogProps) {
   const [filter, setFilter] = useState('');
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
-  // Clear filter when dialog closes to avoid stale search state on reopen
+  // Clear filter and collapsed state when dialog closes
   useEffect(() => {
-    if (!open) setFilter('');
+    if (!open) {
+      setFilter('');
+      setCollapsed(new Set());
+    }
   }, [open]);
+
+  const toggleGroup = useCallback((groupJid: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupJid)) next.delete(groupJid);
+      else next.add(groupJid);
+      return next;
+    });
+  }, []);
 
   const filtered = useMemo(() => {
     if (!filter.trim()) return targets;
@@ -98,34 +111,50 @@ export function BindingTargetDialog({
           )}
 
           {!targetsLoading &&
-            Array.from(grouped.entries()).map(([groupJid, items]) => (
-              <div key={groupJid} className="space-y-1">
-                <div className="flex items-center gap-1.5 px-1 text-xs font-medium text-muted-foreground">
-                  <FolderOpen className="w-3 h-3" />
-                  {items[0].groupName}
+            Array.from(grouped.entries()).map(([groupJid, items]) => {
+              const isCollapsed = collapsed.has(groupJid);
+              const FolderIcon = isCollapsed ? Folder : FolderOpen;
+              return (
+                <div key={groupJid}>
+                  <button
+                    type="button"
+                    onClick={() => toggleGroup(groupJid)}
+                    className="w-full flex items-center gap-1.5 px-1 py-1 text-xs font-medium text-muted-foreground hover:text-foreground rounded transition-colors cursor-pointer select-none"
+                  >
+                    <ChevronRight
+                      className={`w-3 h-3 transition-transform duration-150 ${isCollapsed ? '' : 'rotate-90'}`}
+                    />
+                    <FolderIcon className="w-3 h-3" />
+                    <span className="truncate">{items[0].groupName}</span>
+                    <span className="ml-auto text-[10px] opacity-60">{items.length}</span>
+                  </button>
+                  {!isCollapsed && (
+                    <div className="space-y-1 mt-1 ml-3 pl-2 border-l border-border/50">
+                      {items.map((target) => {
+                        const key = target.agentId || `main:${target.groupJid}`;
+                        const isSelecting = selecting === key;
+                        return (
+                          <button
+                            key={key}
+                            onClick={() => onSelect(target)}
+                            disabled={!!selecting}
+                            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg border border-border hover:border-brand-300 hover:bg-brand-50/50 dark:hover:border-brand-600 dark:hover:bg-brand-700/10 transition-colors text-left cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            <MessageSquare className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                            <span className="flex-1 text-sm truncate">
+                              {target.type === 'agent'
+                                ? target.agentName || 'Agent'
+                                : '主对话'}
+                            </span>
+                            {isSelecting && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-                {items.map((target) => {
-                  const key = target.agentId || `main:${target.groupJid}`;
-                  const isSelecting = selecting === key;
-                  return (
-                    <button
-                      key={key}
-                      onClick={() => onSelect(target)}
-                      disabled={!!selecting}
-                      className="w-full flex items-center gap-3 px-3 py-2 rounded-lg border border-border hover:border-brand-300 hover:bg-brand-50/50 dark:hover:border-brand-600 dark:hover:bg-brand-700/10 transition-colors text-left cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <MessageSquare className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-                      <span className="flex-1 text-sm truncate">
-                        {target.type === 'agent'
-                          ? target.agentName || 'Agent'
-                          : '主对话'}
-                      </span>
-                      {isSelecting && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />}
-                    </button>
-                  );
-                })}
-              </div>
-            ))}
+              );
+            })}
         </div>
 
         {/* Restore default button */}

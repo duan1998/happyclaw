@@ -9,9 +9,16 @@ export interface DeleteConflictMainBinding {
   name: string;
 }
 
+export interface DeleteConflictTask {
+  id: string;
+  prompt: string;
+  status: string;
+}
+
 export interface GroupDeleteConflict {
   boundAgents?: DeleteConflictAgentBinding[];
   boundMainImGroups?: DeleteConflictMainBinding[];
+  boundTasks?: DeleteConflictTask[];
 }
 
 export function getPreferredGroupJid(
@@ -42,12 +49,27 @@ export function formatGroupDeleteConflictMessage(
           .join('、')}`
       : null;
 
-  const details = [...agentLines, ...(mainLine ? [mainLine] : [])];
-  if (details.length === 0) {
-    return '该工作区绑定了 IM 渠道，请先解绑后再删除。';
+  const taskLines =
+    conflict.boundTasks && conflict.boundTasks.length > 0
+      ? conflict.boundTasks.map(
+          (t) => `任务「${t.prompt}」(${t.status === 'active' ? '运行中' : t.status === 'paused' ? '已暂停' : '解析中'})`,
+        )
+      : [];
+
+  const imDetails = [...agentLines, ...(mainLine ? [mainLine] : [])];
+  const sections: string[] = [];
+
+  if (imDetails.length > 0) {
+    sections.push(`IM 绑定:\n${imDetails.join('\n')}`);
+  }
+  if (taskLines.length > 0) {
+    sections.push(`定时任务:\n${taskLines.join('\n')}`);
   }
 
-  return `该工作区绑定了 IM 渠道，请先解绑后再删除：\n${details.join(
-    '\n',
-  )}`;
+  if (sections.length === 0) {
+    return '该工作区存在绑定关系，请确认后删除。';
+  }
+
+  return `该工作区存在以下绑定关系:\n\n${sections.join('\n\n')}\n\n强制删除将自动解绑以上关联。`;
 }
+

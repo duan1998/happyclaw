@@ -24,6 +24,9 @@ import {
   updateAgentInfo,
   updateAgentModel,
   updateChatName,
+  getActiveTasksByChatJid,
+  unbindTasksFromChat,
+  getUserHomeGroup,
 } from '../db.js';
 import { DATA_DIR, GROUPS_DIR } from '../config.js';
 import {
@@ -275,23 +278,51 @@ router.delete('/:jid/agents/:agentId', authMiddleware, async (c) => {
     return c.json({ error: 'Agent not found' }, 404);
   }
 
-  // Block deletion if conversation agent has active IM bindings
+  const force = c.req.query('force') === 'true';
+
+  // Check for IM bindings and task bindings on conversation agents
   if (agent.kind === 'conversation') {
     const linkedImGroups = getGroupsByTargetAgent(agentId);
-    if (linkedImGroups.length > 0) {
+    const virtualChatJid = `${jid}#agent:${agentId}`;
+    const boundTasks = getActiveTasksByChatJid(virtualChatJid);
+
+    if ((linkedImGroups.length > 0 || boundTasks.length > 0) && !force) {
       return c.json(
         {
-          error:
-            'Agent has active IM bindings. Unbind all IM groups before deleting.',
+          error: '该对话存在绑定关系，请确认后强制删除。',
           linked_im_groups: linkedImGroups.map(
             ({ jid: imJid, group: imGroup }) => ({
               jid: imJid,
               name: imGroup.name,
             }),
           ),
+          bound_tasks: boundTasks.map((t) => ({
+            id: t.id,
+            prompt: t.prompt.slice(0, 60),
+            status: t.status,
+          })),
         },
         409,
       );
+    }
+
+    // Force: auto-unbind IM and re-bind tasks to main conversation
+    if (force) {
+      for (const { jid: imJid, group: imGroup } of linkedImGroups) {
+        const updated = clearImBindingTargets(imGroup);
+        setRegisteredGroup(imJid, updated);
+        const deps = getWebDeps();
+        if (deps) {
+          deps.getRegisteredGroups()[imJid] = updated;
+        }
+      }
+      if (boundTasks.length > 0) {
+        const homeGroup = getUserHomeGroup(user.id);
+        if (homeGroup) {
+          unbindTasksFromChat(virtualChatJid, homeGroup.folder, homeGroup.jid);
+        }
+      }
+      writeDebugLog('AGENT-DELETE', `force-delete: agentId=${agentId} unbound ${linkedImGroups.length} IM groups, ${boundTasks.length} tasks`);
     }
   }
 

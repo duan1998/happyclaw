@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Loader2, Sparkles, X, SlidersHorizontal } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -15,6 +15,7 @@ import { api } from '../../api/client';
 import { showToast } from '../../utils/toast';
 import { INTERVAL_UNITS, CHANNEL_OPTIONS, toggleNotifyChannel } from '../../utils/task-utils';
 import { useConnectedChannels } from '../../hooks/useConnectedChannels';
+import type { GroupInfo, AgentInfo } from '../../types';
 
 interface CreateTaskFormProps {
   onSubmit: (data: {
@@ -25,12 +26,35 @@ interface CreateTaskFormProps {
     executionMode?: 'host' | 'container';
     scriptCommand: string;
     notifyChannels: string[] | null;
+    contextMode: 'group' | 'isolated';
+    groupFolder?: string;
+    chatJid?: string;
   }) => Promise<void>;
   onClose: () => void;
   isAdmin?: boolean;
 }
 
 type CreateMode = 'ai' | 'manual';
+
+interface WorkspaceOption {
+  jid: string;
+  name: string;
+  folder: string;
+}
+
+interface ConversationOption {
+  jid: string;
+  name: string;
+  isMain: boolean;
+  imBindings?: string[];
+}
+
+interface ImGroupInfo {
+  jid: string;
+  name: string;
+  bound_agent_id: string | null;
+  bound_main_jid: string | null;
+}
 
 export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormProps) {
   const [mode, setMode] = useState<CreateMode>('ai');
@@ -54,9 +78,18 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
 
-  // --- Shared state ---
+  // --- Shared state (across AI + Manual) ---
   const [notifyChannels, setNotifyChannels] = useState<string[] | null>(null);
   const connectedChannels = useConnectedChannels();
+  const [contextMode, setContextMode] = useState<'group' | 'isolated'>('group');
+  const [selectedWorkspaceJid, setSelectedWorkspaceJid] = useState('');
+  const [selectedChatJid, setSelectedChatJid] = useState('');
+
+  // --- Workspace & conversation lists ---
+  const [workspaces, setWorkspaces] = useState<WorkspaceOption[]>([]);
+  const [conversations, setConversations] = useState<ConversationOption[]>([]);
+  const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
+  const [loadingConversations, setLoadingConversations] = useState(false);
 
   const isScript = formData.executionType === 'script';
 
@@ -71,15 +104,115 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
     setNotifyChannels((prev) => toggleNotifyChannel(prev, key, connectedKeys));
   };
 
+  // Fetch workspaces on mount
+  useEffect(() => {
+    setLoadingWorkspaces(true);
+    api
+      .get<{ groups: Record<string, GroupInfo> }>('/api/groups')
+      .then((data) => {
+        const opts: WorkspaceOption[] = Object.entries(data.groups)
+          .filter(([jid]) => jid.startsWith('web:'))
+          .map(([jid, g]) => ({ jid, name: g.name, folder: g.folder }));
+        setWorkspaces(opts);
+        // Default to user's home workspace
+        const home = Object.entries(data.groups).find(([, g]) => g.is_my_home);
+        if (home) setSelectedWorkspaceJid(home[0]);
+        else if (opts.length > 0) setSelectedWorkspaceJid(opts[0].jid);
+      })
+      .catch(() => {})
+      .finally(() => setLoadingWorkspaces(false));
+  }, []);
+
+  // Fetch conversations + IM bindings when workspace changes
+  const loadConversations = useCallback(
+    async (workspaceJid: string) => {
+      if (!workspaceJid) {
+        setConversations([]);
+        setSelectedChatJid('');
+        return;
+      }
+      setLoadingConversations(true);
+      try {
+        const [agentsData, imData] = await Promise.all([
+          api.get<{ agents: AgentInfo[] }>(
+            `/api/groups/${encodeURIComponent(workspaceJid)}/agents`,
+          ),
+          api.get<{ imGroups: ImGroupInfo[] }>(
+            `/api/groups/${encodeURIComponent(workspaceJid)}/im-groups`,
+          ).catch(() => ({ imGroups: [] as ImGroupInfo[] })),
+        ]);
+
+        const conversationAgents = agentsData.agents.filter(
+          (a) => a.kind === 'conversation',
+        );
+        const agentIds = new Set(conversationAgents.map((a) => a.id));
+
+        // Build main conversation IM bindings (bound_main_jid matching this workspace)
+        const mainImNames = imData.imGroups
+          .filter((g) => g.bound_main_jid === workspaceJid)
+          .map((g) => g.name);
+
+        // Build agent → IM binding name map (only agents belonging to this workspace)
+        const agentImMap = new Map<string, string[]>();
+        for (const g of imData.imGroups) {
+          if (g.bound_agent_id && agentIds.has(g.bound_agent_id)) {
+            const existing = agentImMap.get(g.bound_agent_id) || [];
+            existing.push(g.name);
+            agentImMap.set(g.bound_agent_id, existing);
+          }
+        }
+
+        const opts: ConversationOption[] = [
+          {
+            jid: workspaceJid,
+            name: '主对话',
+            isMain: true,
+            imBindings: mainImNames,
+          },
+          ...conversationAgents.map((a) => ({
+            jid: `${workspaceJid}#agent:${a.id}`,
+            name: a.name,
+            isMain: false,
+            imBindings: agentImMap.get(a.id) || [],
+          })),
+        ];
+        setConversations(opts);
+        setSelectedChatJid(workspaceJid);
+      } catch {
+        setConversations([{ jid: workspaceJid, name: '主对话', isMain: true }]);
+        setSelectedChatJid(workspaceJid);
+      } finally {
+        setLoadingConversations(false);
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (contextMode === 'group' && selectedWorkspaceJid) {
+      loadConversations(selectedWorkspaceJid);
+    }
+  }, [contextMode, selectedWorkspaceJid, loadConversations]);
+
+  const selectedWorkspaceFolder = workspaces.find(
+    (w) => w.jid === selectedWorkspaceJid,
+  )?.folder;
+
   // --- AI mode handler ---
   const handleAiCreate = async () => {
     if (!aiDescription.trim()) return;
     setAiSubmitting(true);
     try {
-      await api.post('/api/tasks/ai', {
+      const body: Record<string, unknown> = {
         description: aiDescription.trim(),
         notify_channels: notifyChannels,
-      });
+        context_mode: contextMode,
+      };
+      if (contextMode === 'group' && selectedWorkspaceFolder) {
+        body.group_folder = selectedWorkspaceFolder;
+        if (selectedChatJid) body.chat_jid = selectedChatJid;
+      }
+      await api.post('/api/tasks/ai', body);
       showToast('任务已创建', 'AI 正在后台解析调度参数，稍后自动激活');
       onClose();
     } catch (error) {
@@ -143,6 +276,9 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
         executionMode: formData.executionMode,
         scriptCommand: formData.scriptCommand,
         notifyChannels,
+        contextMode,
+        groupFolder: contextMode === 'group' ? selectedWorkspaceFolder : undefined,
+        chatJid: contextMode === 'group' ? selectedChatJid : undefined,
       });
     } catch (error) {
       console.error('Failed to create task:', error);
@@ -188,6 +324,102 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
         </p>
       )}
     </div>
+  );
+
+  // --- Context mode + workspace/conversation selector (shared across AI + Manual) ---
+  const renderContextSelector = () => (
+    <>
+      {/* Context Mode */}
+      <div>
+        <label className="block text-sm font-medium text-foreground mb-2">上下文模式</label>
+        <Select
+          value={contextMode}
+          onValueChange={(v) => setContextMode(v as 'group' | 'isolated')}
+        >
+          <SelectTrigger className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="group">群组模式</SelectItem>
+            <SelectItem value="isolated">隔离模式</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {contextMode === 'group'
+            ? '注入到已有工作区的对话中，共享上下文和历史'
+            : '每次执行创建独立临时工作区，互不干扰'}
+        </p>
+      </div>
+
+      {/* Workspace selector (group mode only) */}
+      {contextMode === 'group' && (
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-2">目标工作区</label>
+          <Select
+            value={selectedWorkspaceJid}
+            onValueChange={(v) => {
+              setSelectedWorkspaceJid(v);
+              setSelectedChatJid('');
+            }}
+            disabled={loadingWorkspaces}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder={loadingWorkspaces ? '加载中...' : '选择工作区'} />
+            </SelectTrigger>
+            <SelectContent>
+              {workspaces.map((ws) => (
+                <SelectItem key={ws.jid} value={ws.jid}>
+                  {ws.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="mt-1 text-xs text-muted-foreground">
+            任务将在该工作区的对话中执行
+          </p>
+        </div>
+      )}
+
+      {/* Conversation selector (group mode + workspace selected) */}
+      {contextMode === 'group' && selectedWorkspaceJid && conversations.length > 1 && (
+        <div>
+          <label className="block text-sm font-medium text-foreground mb-2">目标对话</label>
+          <Select
+            value={selectedChatJid}
+            onValueChange={setSelectedChatJid}
+            disabled={loadingConversations}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder={loadingConversations ? '加载中...' : '选择对话'} />
+            </SelectTrigger>
+            <SelectContent>
+              {conversations.map((conv) => {
+                const imLabel = conv.imBindings && conv.imBindings.length > 0
+                  ? conv.imBindings.length <= 2
+                    ? conv.imBindings.join(', ')
+                    : `${conv.imBindings.slice(0, 2).join(', ')}...`
+                  : null;
+                return (
+                  <SelectItem key={conv.jid} value={conv.jid}>
+                    <span className="flex items-center gap-2">
+                      {conv.name}
+                      {imLabel && (
+                        <span className="text-xs text-muted-foreground truncate max-w-[200px]">
+                          ({imLabel})
+                        </span>
+                      )}
+                    </span>
+                  </SelectItem>
+                );
+              })}
+            </SelectContent>
+          </Select>
+          <p className="mt-1 text-xs text-muted-foreground">
+            如该对话绑定了 IM 渠道，任务结果将自动推送到对应 IM
+          </p>
+        </div>
+      )}
+    </>
   );
 
   return (
@@ -252,6 +484,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
               </p>
             </div>
 
+            {renderContextSelector()}
             {renderNotifyChannels()}
 
             {/* Actions */}
@@ -463,6 +696,7 @@ export function CreateTaskForm({ onSubmit, onClose, isAdmin }: CreateTaskFormPro
               )}
             </div>
 
+            {renderContextSelector()}
             {renderNotifyChannels()}
 
             {/* Actions */}

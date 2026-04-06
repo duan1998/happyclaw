@@ -61,6 +61,16 @@ function resolveTargetGroupJid(
   task: ScheduledTask,
   groups: Record<string, RegisteredGroup>,
 ): string {
+  // For virtual agent JIDs (web:xxx#agent:agentId), resolve the base workspace JID
+  // but return the full virtual JID so the task prompt routes to the correct conversation.
+  if (task.chat_jid.includes('#agent:')) {
+    const baseJid = task.chat_jid.split('#agent:')[0];
+    const baseGroup = groups[baseJid];
+    if (baseGroup && baseGroup.folder === task.group_folder) {
+      return task.chat_jid;
+    }
+  }
+
   const directTarget = groups[task.chat_jid];
   if (directTarget && directTarget.folder === task.group_folder) {
     return task.chat_jid;
@@ -184,8 +194,11 @@ export interface SchedulerDependencies {
   ) => Promise<string | undefined | void>;
   broadcastStreamEvent?: (chatJid: string, event: StreamEvent) => void;
   onWorkspaceCreated?: (jid: string, folder: string, name: string, userId?: string) => void;
-  /** Store task prompt as a user-visible message in the workspace chat */
-  storePromptMessage?: (chatJid: string, senderId: string, senderName: string, text: string) => void;
+  /** Store task prompt as a user-visible message in the workspace chat.
+   *  When fanOutToAllIm is true, the reply will be sent to ALL bound IM groups (not just sourceJid). */
+  storePromptMessage?: (chatJid: string, senderId: string, senderName: string, text: string, sourceJid?: string, fanOutToAllIm?: boolean) => void;
+  /** Resolve IM binding JID for a given chat JID (for group-mode task IM routing) */
+  resolveImBindingForChat?: (chatJid: string) => string | null;
   assistantName: string;
   dailySummaryDeps?: DailySummaryDeps;
 }
@@ -706,19 +719,29 @@ async function runGroupModeTask(
       throw new Error('storePromptMessage dependency not available');
     }
 
-    // Store prompt as a user message in the source workspace chat
+    // Resolve IM binding for the target chat so replies route back to IM
+    const imSourceJid = deps.resolveImBindingForChat?.(targetGroupJid) ?? undefined;
+
+    writeDebugLog('TASK-GROUP', `runGroupModeTask: taskId=${task.id} targetGroupJid=${targetGroupJid} imSourceJid=${imSourceJid ?? 'none'} senderName=${senderName}`);
+
+    // Store prompt as a user message in the source workspace chat.
+    // fanOutToAllIm=true: task replies should reach ALL bound IM groups,
+    // not just the primary source (unlike interactive messages which only
+    // reply to the originating IM channel).
     deps.storePromptMessage(
       targetGroupJid,
       owner?.id || 'system',
       senderName,
       task.prompt,
+      imSourceJid,
+      true,
     );
 
     // Trigger normal message processing for the source workspace
     deps.queue.enqueueMessageCheck(targetGroupJid);
 
     logger.info(
-      { taskId: task.id, targetGroupJid, contextMode: 'group' },
+      { taskId: task.id, targetGroupJid, imSourceJid, contextMode: 'group' },
       'Group-mode task injected into source workspace',
     );
 

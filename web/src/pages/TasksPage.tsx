@@ -1,19 +1,27 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTasksStore } from '../stores/tasks';
 import { useAuthStore } from '../stores/auth';
 import { useGroupsStore } from '../stores/groups';
 import { TaskCard } from '../components/tasks/TaskCard';
 import { CreateTaskForm } from '../components/tasks/CreateTaskForm';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Plus, RefreshCw, Clock, X } from 'lucide-react';
 import { PageHeader } from '@/components/common/PageHeader';
 import { SkeletonCardList } from '@/components/common/Skeletons';
 import { EmptyState } from '@/components/common/EmptyState';
 import { Button } from '@/components/ui/button';
 
+type PendingAction =
+  | { type: 'pause'; id: string }
+  | { type: 'resume'; id: string }
+  | { type: 'delete'; id: string };
+
 export function TasksPage() {
   const { tasks, loading, error, loadTasks, createTask, updateTaskStatus, deleteTask, runTaskNow } = useTasksStore();
   const { user } = useAuthStore();
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [pending, setPending] = useState<PendingAction | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const isAdmin = user?.role === 'admin';
 
   useEffect(() => {
@@ -36,6 +44,9 @@ export function TasksPage() {
     executionMode?: 'host' | 'container';
     scriptCommand: string;
     notifyChannels: string[] | null;
+    contextMode: 'group' | 'isolated';
+    groupFolder?: string;
+    chatJid?: string;
   }) => {
     await createTask(
       data.prompt,
@@ -45,29 +56,42 @@ export function TasksPage() {
       data.executionMode,
       data.scriptCommand,
       data.notifyChannels,
+      data.contextMode,
+      data.groupFolder,
+      data.chatJid,
     );
     setShowCreateForm(false);
   };
 
-  const handlePause = async (id: string) => {
-    if (confirm('确定要暂停此任务吗？')) {
-      await updateTaskStatus(id, 'paused');
+  const handlePause = useCallback((id: string) => setPending({ type: 'pause', id }), []);
+  const handleResume = useCallback((id: string) => setPending({ type: 'resume', id }), []);
+  const handleDelete = useCallback((id: string) => setPending({ type: 'delete', id }), []);
+
+  const confirmAction = async () => {
+    if (!pending) return;
+    setConfirming(true);
+    try {
+      if (pending.type === 'pause') {
+        await updateTaskStatus(pending.id, 'paused');
+      } else if (pending.type === 'resume') {
+        await updateTaskStatus(pending.id, 'active');
+      } else {
+        await deleteTask(pending.id);
+        useGroupsStore.getState().loadGroups();
+      }
+    } finally {
+      setConfirming(false);
+      setPending(null);
     }
   };
 
-  const handleResume = async (id: string) => {
-    if (confirm('确定要恢复此任务吗？')) {
-      await updateTaskStatus(id, 'active');
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    if (confirm('确定要删除此任务吗？关联的工作区也会被删除，此操作不可撤销。')) {
-      await deleteTask(id);
-      // Refresh sidebar — workspace was deleted along with the task
-      useGroupsStore.getState().loadGroups();
-    }
-  };
+  const confirmDialogProps = pending
+    ? pending.type === 'delete'
+      ? { title: '删除任务', message: '确定要删除此任务吗？关联的工作区也会被删除，此操作不可撤销。', confirmText: '删除', confirmVariant: 'danger' as const }
+      : pending.type === 'pause'
+        ? { title: '暂停任务', message: '确定要暂停此任务吗？', confirmText: '暂停' }
+        : { title: '恢复任务', message: '确定要恢复此任务吗？任务将重新开始调度执行。', confirmText: '恢复' }
+    : null;
 
   const activeTasks = tasks.filter((t) => t.status === 'active');
   const pausedTasks = tasks.filter((t) => t.status === 'paused');
@@ -183,6 +207,16 @@ export function TasksPage() {
           onSubmit={handleCreateTask}
           onClose={() => { setShowCreateForm(false); loadTasks(); }}
           isAdmin={isAdmin}
+        />
+      )}
+
+      {confirmDialogProps && (
+        <ConfirmDialog
+          open={!!pending}
+          onClose={() => setPending(null)}
+          onConfirm={confirmAction}
+          loading={confirming}
+          {...confirmDialogProps}
         />
       )}
     </div>

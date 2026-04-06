@@ -52,6 +52,10 @@ import {
   getUserPinnedGroups,
   pinGroup,
   unpinGroup,
+  getActiveTasksByFolder,
+  getActiveTasksByChatJid,
+  unbindTasksFromFolder,
+  getUserHomeGroup,
 } from '../db.js';
 import { logger } from '../logger.js';
 import { writeDebugLog } from '../debug-log.js';
@@ -880,6 +884,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   if (!deps) return c.json({ error: 'Server not initialized' }, 500);
 
   const jid = c.req.param('jid');
+  const force = c.req.query('force') === 'true';
   const existing = getRegisteredGroup(jid);
   if (!existing) return c.json({ error: 'Group not found' }, 404);
 
@@ -899,7 +904,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
     );
   }
 
-  // Block deletion if any IM binding exists (agent or main conversation)
+  // Collect IM bindings (agent-level and main conversation)
   const agents = listAgentsByJid(jid);
   const boundAgents: Array<{
     agentId: string;
@@ -918,7 +923,6 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
       }
     }
   }
-  // Search by actual JID; also check legacy folder-based format for backward compat
   const mainBoundByJid = getGroupsByTargetMainJid(jid);
   const legacyMainJid = `web:${existing.folder}`;
   const mainBoundByFolder =
@@ -928,19 +932,71 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
     ...mainBoundByJid,
     ...mainBoundByFolder.filter((l) => !mainBoundJids.has(l.jid)),
   ];
-  if (boundAgents.length > 0 || mainBound.length > 0) {
+
+  // Collect bound scheduled tasks
+  const boundTasks = getActiveTasksByFolder(existing.folder);
+
+  const hasImBindings = boundAgents.length > 0 || mainBound.length > 0;
+  const hasTaskBindings = boundTasks.length > 0;
+
+  // If bindings exist and not force, return 409 with details
+  if ((hasImBindings || hasTaskBindings) && !force) {
     const mainImGroups = mainBound.map((l) => ({
       jid: l.jid,
       name: l.group.name,
     }));
+    const taskSummaries = boundTasks.map((t) => ({
+      id: t.id,
+      prompt: t.prompt.slice(0, 60),
+      status: t.status,
+    }));
+    writeDebugLog('GROUP-DELETE', `blocked: jid=${jid} folder=${existing.folder} imBindings=${boundAgents.length + mainBound.length} tasks=${boundTasks.length}`);
     return c.json(
       {
-        error: '该工作区绑定了 IM 群组，请先解绑后再删除。',
+        error: '该工作区存在绑定关系，请确认后强制删除。',
         bound_agents: boundAgents,
         bound_main_im_groups: mainImGroups,
+        bound_tasks: taskSummaries,
       },
       409,
     );
+  }
+
+  // Force mode: auto-unbind IM and tasks before deletion
+  if (force && (hasImBindings || hasTaskBindings)) {
+    const { clearImBindingTargets } = await import('../im-binding-utils.js');
+
+    // Unbind agent-level IM bindings
+    for (const ba of boundAgents) {
+      for (const ig of ba.imGroups) {
+        const imGroup = getRegisteredGroup(ig.jid);
+        if (imGroup) {
+          const updated = clearImBindingTargets(imGroup);
+          setRegisteredGroup(ig.jid, updated);
+          const groups = deps.getRegisteredGroups();
+          groups[ig.jid] = updated;
+        }
+      }
+    }
+    // Unbind main conversation IM bindings
+    for (const mb of mainBound) {
+      const imGroup = getRegisteredGroup(mb.jid);
+      if (imGroup) {
+        const updated = clearImBindingTargets(imGroup);
+        setRegisteredGroup(mb.jid, updated);
+        const groups = deps.getRegisteredGroups();
+        groups[mb.jid] = updated;
+      }
+    }
+    // Rebind tasks to user's home group
+    if (hasTaskBindings) {
+      const homeGroup = getUserHomeGroup(authUser.id);
+      if (homeGroup) {
+        const unbound = unbindTasksFromFolder(existing.folder, homeGroup.folder, homeGroup.jid);
+        writeDebugLog('GROUP-DELETE', `force-unbound ${unbound} tasks from folder=${existing.folder} to home=${homeGroup.folder}`);
+      }
+    }
+    writeDebugLog('GROUP-DELETE', `force-delete: jid=${jid} unbound ${boundAgents.length} agents, ${mainBound.length} main bindings, ${boundTasks.length} tasks`);
   }
 
   // Wait for container to fully stop before cleaning up its files

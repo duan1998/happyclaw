@@ -89,6 +89,8 @@ import {
   cleanupOldDailyUsage,
   cleanupOldBillingAuditLog,
   insertUsageRecord,
+  getGroupsByTargetMainJid,
+  getGroupsByTargetAgent,
 } from './db.js';
 // feishu.js deprecated exports are no longer needed; imManager handles all connections
 import { imManager } from './im-manager.js';
@@ -512,6 +514,11 @@ const activeRouteUpdaters = new Map<string, ReplyRouteUpdater>();
 // running processGroupMessages.  IPC watcher reads this to forward send_message
 // outputs to the correct IM channel (the running session holds the truth).
 const activeImReplyRoutes = new Map<string, string | null>();
+
+// Chat JIDs whose next reply should fan out to ALL bound IM groups
+// (not just the source).  Set by scheduled task injection, consumed and
+// cleared by processGroupMessages / conversation agent reply handler.
+const taskFanOutChats = new Set<string>();
 
 // Track consecutive IM send failures per JID for auto-unbind
 const imSendFailCounts = new Map<string, number>();
@@ -2717,6 +2724,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
+  // Advance lastAgentTimestamp immediately so the polling loop doesn't
+  // re-send these same messages via IPC while the agent is starting up.
+  // lastCommittedCursor is NOT advanced here — it only moves in
+  // commitCursor() after the agent produces a result, enabling recovery
+  // of messages consumed but never processed (e.g. crash before reply).
+  {
+    const last = missedMessages[missedMessages.length - 1];
+    lastAgentTimestamp[chatJid] = {
+      timestamp: last.timestamp,
+      id: last.id,
+    };
+    saveState();
+  }
+
   // Admin home is shared as web:main, so select runtime owner from the latest
   // active admin sender to avoid writing global memory into another admin's
   // user-global directory.
@@ -3471,10 +3492,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                 }
               }
 
-              // Optional mirror mode for explicitly bound IM channels
+              // Mirror mode + task fan-out for explicitly bound IM channels.
+              // For scheduled tasks (taskFanOutChats), bypass reply_policy
+              // and send to ALL bound IM groups, not just 'mirror' ones.
               const webJid = chatJid.startsWith('web:')
                 ? chatJid
                 : `web:${effectiveGroup.folder}`;
+              const isTaskFanOut =
+                taskFanOutChats.has(chatJid) && replySourceImJid != null;
               for (const [imJid, g] of Object.entries(registeredGroups)) {
                 if (
                   g.target_main_jid !== webJid ||
@@ -3482,9 +3507,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
                   imJid === replySourceImJid
                 )
                   continue;
-                if (g.reply_policy !== 'mirror') continue;
+                if (!isTaskFanOut && g.reply_policy !== 'mirror') continue;
                 if (getChannelType(imJid))
                   sendImWithFailTracking(imJid, text, localImagePaths);
+              }
+              if (isTaskFanOut) {
+                taskFanOutChats.delete(chatJid);
+                writeDebugLog('TASK-FANOUT', `fan-out completed for chatJid=${chatJid}`);
               }
 
               sentReply = true;
@@ -3543,6 +3572,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (idleTimer) clearTimeout(idleTimer);
     activeRouteUpdaters.delete(effectiveGroup.folder);
     activeImReplyRoutes.delete(effectiveGroup.folder);
+    taskFanOutChats.delete(chatJid);
 
     // ── 检测中断：有累积文本但从未发送回复 ──
     const wasInterrupted = streamInterrupted && !sentReply;
@@ -6055,13 +6085,19 @@ async function processAgentConversation(
           );
         }
 
-        // Optional mirror mode for linked IM channels
+        // Mirror mode + task fan-out for linked IM channels
+        const isAgentTaskFanOut =
+          taskFanOutChats.has(chatJid) && replySourceImJid != null;
         for (const [imJid, g] of Object.entries(registeredGroups)) {
           if (g.target_agent_id !== agentId || imJid === replySourceImJid)
             continue;
-          if (g.reply_policy !== 'mirror') continue;
+          if (!isAgentTaskFanOut && g.reply_policy !== 'mirror') continue;
           if (getChannelType(imJid))
             sendImWithFailTracking(imJid, text, localImagePaths);
+        }
+        if (isAgentTaskFanOut) {
+          taskFanOutChats.delete(chatJid);
+          writeDebugLog('TASK-FANOUT', `agent fan-out completed for chatJid=${chatJid} agentId=${agentId}`);
         }
 
         commitCursor();
@@ -6465,6 +6501,7 @@ async function processAgentConversation(
     );
 
     ipcWatcherManager?.unwatchGroup(effectiveGroup.folder);
+    taskFanOutChats.delete(chatJid);
   }
 }
 
@@ -6567,12 +6604,15 @@ async function startMessageLoop(): Promise<void> {
           }
 
           // Pull all messages since lastAgentTimestamp to preserve full context.
+          // If allPending is empty, the messages were already consumed by
+          // processGroupMessages (which advances lastAgentTimestamp early).
+          // Skip IPC injection to avoid sending duplicates.
           const allPending = getMessagesSince(
             chatJid,
             lastAgentTimestamp[chatJid] || EMPTY_CURSOR,
           );
-          const messagesToSend =
-            allPending.length > 0 ? allPending : groupMessages;
+          if (allPending.length === 0) continue;
+          const messagesToSend = allPending;
 
           // Home and non-home groups now share the same IPC injection path.
           // Reply routing is dynamically updated via activeRouteUpdaters when
@@ -8343,7 +8383,7 @@ async function main(): Promise<void> {
     sendMessage,
     broadcastStreamEvent,
     onWorkspaceCreated: broadcastGroupCreated,
-    storePromptMessage: (chatJid, senderId, senderName, text) => {
+    storePromptMessage: (chatJid, senderId, senderName, text, sourceJid, fanOutToAllIm) => {
       const msgId = crypto.randomUUID();
       const now = new Date().toISOString();
       ensureChatExists(chatJid);
@@ -8356,6 +8396,7 @@ async function main(): Promise<void> {
         now,
         false,
         {
+          sourceJid,
           meta: { sourceKind: 'scheduled_task_prompt' },
         },
       );
@@ -8367,7 +8408,32 @@ async function main(): Promise<void> {
         content: text,
         timestamp: now,
         is_from_me: false,
+        source_jid: sourceJid,
       });
+      if (fanOutToAllIm) {
+        taskFanOutChats.add(chatJid);
+        writeDebugLog('TASK-FANOUT', `registered fan-out for chatJid=${chatJid}`);
+      }
+    },
+    resolveImBindingForChat: (chatJid: string): string | null => {
+      // Check if any IM group routes to this chat as main conversation
+      const mainBindings = getGroupsByTargetMainJid(chatJid);
+      if (mainBindings.length > 0) {
+        writeDebugLog('TASK-IM', `resolveImBindingForChat: chatJid=${chatJid} → main binding ${mainBindings[0].jid}`);
+        return mainBindings[0].jid;
+      }
+      // Check if chatJid is an agent virtual JID (web:xxx#agent:agentId)
+      const agentMatch = chatJid.match(/#agent:(.+)$/);
+      if (agentMatch) {
+        const agentId = agentMatch[1];
+        const agentBindings = getGroupsByTargetAgent(agentId);
+        if (agentBindings.length > 0) {
+          writeDebugLog('TASK-IM', `resolveImBindingForChat: chatJid=${chatJid} → agent binding ${agentBindings[0].jid}`);
+          return agentBindings[0].jid;
+        }
+      }
+      writeDebugLog('TASK-IM', `resolveImBindingForChat: chatJid=${chatJid} → no IM binding found`);
+      return null;
     },
     assistantName: ASSISTANT_NAME,
     dailySummaryDeps: {

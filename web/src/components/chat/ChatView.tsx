@@ -646,15 +646,30 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         agents={agents}
         activeTab={activeAgentTab}
         onSelectTab={(id) => setActiveAgentTab(groupJid, id)}
-        onDeleteAgent={(id) => {
-          const agent = agents.find((a) => a.id === id);
-          if (agent?.linked_im_groups && agent.linked_im_groups.length > 0) {
-            const names = agent.linked_im_groups.map((g) => g.name).join('、');
-            alert(`该对话已绑定 IM 渠道（${names}），请先解绑后再删除。`);
-            setBindingAgentId(id);
-            return;
+        onDeleteAgent={async (id) => {
+          try {
+            await deleteAgentAction(groupJid, id);
+          } catch (err: unknown) {
+            const typed = err as {
+              linkedImGroups?: Array<{ name: string }>;
+              boundTasks?: Array<{ prompt: string; status: string }>;
+            };
+            if (typed.linkedImGroups || typed.boundTasks) {
+              const imNames = typed.linkedImGroups?.map((g) => g.name).join('、');
+              const taskNames = typed.boundTasks?.map((t) => t.prompt.slice(0, 30)).join('、');
+              const parts: string[] = [];
+              if (imNames) parts.push(`IM 绑定: ${imNames}`);
+              if (taskNames) parts.push(`定时任务: ${taskNames}`);
+              const detail = parts.join('\n');
+              if (confirm(`该对话存在绑定关系:\n${detail}\n\n是否强制删除并解绑？`)) {
+                try {
+                  await deleteAgentAction(groupJid, id, true);
+                } catch {
+                  alert('强制删除失败');
+                }
+              }
+            }
           }
-          deleteAgentAction(groupJid, id);
         }}
         onRenameAgent={(id, currentName) => setRenameTarget({ agentId: id, name: currentName })}
         onCreateConversation={() => setShowNewConversation(true)}

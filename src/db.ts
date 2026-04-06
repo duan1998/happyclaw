@@ -1896,6 +1896,42 @@ export function getTasksForGroup(groupFolder: string): ScheduledTask[] {
     .map(mapTaskRow);
 }
 
+export function getActiveTasksByChatJid(chatJid: string): ScheduledTask[] {
+  return db
+    .prepare(
+      "SELECT * FROM scheduled_tasks WHERE chat_jid = ? AND status IN ('active', 'paused', 'parsing') ORDER BY created_at DESC",
+    )
+    .all(chatJid)
+    .map(mapTaskRow);
+}
+
+export function getActiveTasksByFolder(groupFolder: string): ScheduledTask[] {
+  return db
+    .prepare(
+      "SELECT * FROM scheduled_tasks WHERE group_folder = ? AND status IN ('active', 'paused', 'parsing') ORDER BY created_at DESC",
+    )
+    .all(groupFolder)
+    .map(mapTaskRow);
+}
+
+export function unbindTasksFromChat(chatJid: string, homeFolder: string, homeJid: string): number {
+  const result = db
+    .prepare(
+      "UPDATE scheduled_tasks SET chat_jid = ?, group_folder = ? WHERE chat_jid = ? AND status IN ('active', 'paused', 'parsing')",
+    )
+    .run(homeJid, homeFolder, chatJid);
+  return result.changes;
+}
+
+export function unbindTasksFromFolder(groupFolder: string, homeFolder: string, homeJid: string): number {
+  const result = db
+    .prepare(
+      "UPDATE scheduled_tasks SET chat_jid = ?, group_folder = ? WHERE group_folder = ? AND status IN ('active', 'paused', 'parsing')",
+    )
+    .run(homeJid, homeFolder, groupFolder);
+  return result.changes;
+}
+
 export function getAllTasks(): ScheduledTask[] {
   return db
     .prepare('SELECT * FROM scheduled_tasks ORDER BY created_at DESC')

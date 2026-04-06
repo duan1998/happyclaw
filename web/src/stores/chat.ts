@@ -195,7 +195,7 @@ interface ChatState {
   renameFlow: (jid: string, name: string) => Promise<void>;
   updateGroupRuntime: (jid: string, runtime: 'claude' | 'codex', model?: string | null) => Promise<boolean>;
   togglePin: (jid: string) => Promise<void>;
-  deleteFlow: (jid: string) => Promise<void>;
+  deleteFlow: (jid: string, force?: boolean) => Promise<void>;
   handleStreamEvent: (chatJid: string, event: StreamEvent, agentId?: string) => void;
   handleWsNewMessage: (chatJid: string, wsMsg: any, agentId?: string, source?: string) => void;
   handleAgentStatus: (chatJid: string, agentId: string, status: AgentInfo['status'], name: string, prompt: string, resultSummary?: string, kind?: AgentInfo['kind'], agentRuntime?: string, agentModel?: string, metadataOnly?: boolean) => void;
@@ -207,7 +207,7 @@ interface ChatState {
   handleStreamSnapshot: (chatJid: string, snapshot: StreamSnapshotData, agentId?: string) => void;
   // Sub-agent actions
   loadAgents: (jid: string) => Promise<void>;
-  deleteAgentAction: (jid: string, agentId: string) => Promise<boolean>;
+  deleteAgentAction: (jid: string, agentId: string, force?: boolean) => Promise<boolean>;
   setActiveAgentTab: (jid: string, agentId: string | null) => void;
   // Conversation agent actions
   createConversation: (jid: string, name: string, description?: string, agentRuntime?: 'claude' | 'codex', agentModel?: string) => Promise<AgentInfo | null>;
@@ -1191,9 +1191,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  deleteFlow: async (jid: string) => {
+  deleteFlow: async (jid: string, force?: boolean) => {
+    const url = force
+      ? `/api/groups/${encodeURIComponent(jid)}?force=true`
+      : `/api/groups/${encodeURIComponent(jid)}`;
     try {
-      await api.delete<{ success: boolean }>(`/api/groups/${encodeURIComponent(jid)}`);
+      await api.delete<{ success: boolean }>(url);
       set((s) => {
         const nextGroups = { ...s.groups };
         const nextMessages = { ...s.messages };
@@ -1231,16 +1234,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     } catch (err: unknown) {
       const apiErr = err as { status?: number; body?: Record<string, unknown>; message?: string };
-      if (
-        apiErr.status === 409 &&
-        (apiErr.body?.bound_agents || apiErr.body?.bound_main_im_groups)
-      ) {
-        const e = new Error(apiErr.message || 'IM binding conflict') as Error & {
+      if (apiErr.status === 409) {
+        const e = new Error(apiErr.message || 'Binding conflict') as Error & {
           boundAgents?: unknown;
           boundMainImGroups?: unknown;
+          boundTasks?: unknown;
         };
         e.boundAgents = apiErr.body?.bound_agents;
         e.boundMainImGroups = apiErr.body?.bound_main_im_groups;
+        e.boundTasks = apiErr.body?.bound_tasks;
         throw e;
       }
       throw err;
@@ -1887,9 +1889,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   // 删除子 Agent
-  deleteAgentAction: async (jid, agentId) => {
+  deleteAgentAction: async (jid, agentId, force?) => {
     try {
-      await api.delete(`/api/groups/${encodeURIComponent(jid)}/agents/${agentId}`);
+      const url = force
+        ? `/api/groups/${encodeURIComponent(jid)}/agents/${agentId}?force=true`
+        : `/api/groups/${encodeURIComponent(jid)}/agents/${agentId}`;
+      await api.delete(url);
       clearSdkTaskCleanupTimer(agentId);
       clearSdkTaskStaleTimer(agentId);
       set((s) => {
@@ -1910,7 +1915,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
         };
       });
       return true;
-    } catch {
+    } catch (err: unknown) {
+      const apiErr = err as { status?: number; body?: Record<string, unknown> };
+      if (apiErr.status === 409) {
+        const e = new Error('Binding conflict') as Error & {
+          linkedImGroups?: unknown;
+          boundTasks?: unknown;
+        };
+        e.linkedImGroups = apiErr.body?.linked_im_groups;
+        e.boundTasks = apiErr.body?.bound_tasks;
+        throw e;
+      }
       return false;
     }
   },

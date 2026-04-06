@@ -86,11 +86,16 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
   const handleGroupSelect = (jid: string, folder: string) => { selectGroup(jid); navigate(`/chat/${folder}`); };
   const handleCreated = (jid: string, folder: string) => { selectGroup(jid); navigate(`/chat/${folder}`); };
 
+  const [conflictMessage, setConflictMessage] = useState('');
+  const [showForceDelete, setShowForceDelete] = useState(false);
+
   const handleDeleteConfirm = async () => {
     setDeleteLoading(true);
     try {
       await deleteFlow(deleteState.jid);
       setDeleteState({ open: false, jid: '', name: '' });
+      setConflictMessage('');
+      setShowForceDelete(false);
       const nextJid = useChatStore.getState().currentGroup;
       const nextFolder = nextJid ? useChatStore.getState().groups[nextJid]?.folder : null;
       navigate(nextFolder ? `/chat/${nextFolder}` : '/chat');
@@ -98,18 +103,39 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
       const typed = err as {
         boundAgents?: Array<{ agentName: string; imGroups: Array<{ name: string }> }>;
         boundMainImGroups?: Array<{ name: string }>;
+        boundTasks?: Array<{ id: string; prompt: string; status: string }>;
       };
-      if (typed.boundAgents || typed.boundMainImGroups) {
-        alert(
+      if (typed.boundAgents || typed.boundMainImGroups || typed.boundTasks) {
+        setConflictMessage(
           formatGroupDeleteConflictMessage({
             boundAgents: typed.boundAgents,
             boundMainImGroups: typed.boundMainImGroups,
+            boundTasks: typed.boundTasks,
           }),
         );
+        setShowForceDelete(true);
       } else {
         alert(`删除工作区失败：${err instanceof Error ? err.message : '未知错误'}`);
+        setDeleteState({ open: false, jid: '', name: '' });
       }
+    } finally { setDeleteLoading(false); }
+  };
+
+  const handleForceDeleteConfirm = async () => {
+    setDeleteLoading(true);
+    try {
+      await deleteFlow(deleteState.jid, true);
       setDeleteState({ open: false, jid: '', name: '' });
+      setConflictMessage('');
+      setShowForceDelete(false);
+      const nextJid = useChatStore.getState().currentGroup;
+      const nextFolder = nextJid ? useChatStore.getState().groups[nextJid]?.folder : null;
+      navigate(nextFolder ? `/chat/${nextFolder}` : '/chat');
+    } catch (err: unknown) {
+      alert(`强制删除失败：${err instanceof Error ? err.message : '未知错误'}`);
+      setDeleteState({ open: false, jid: '', name: '' });
+      setConflictMessage('');
+      setShowForceDelete(false);
     } finally { setDeleteLoading(false); }
   };
 
@@ -329,7 +355,26 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
         <CreateContainerDialog open={createOpen} onClose={() => setCreateOpen(false)} onCreated={handleCreated} />
         <RenameDialog open={renameState.open} jid={renameState.jid} currentName={renameState.name} onClose={() => setRenameState({ open: false, jid: '', name: '' })} />
         <ConfirmDialog open={clearState.open} onClose={closeClear} onConfirm={handleClearConfirm} title="重建工作区" message={`确认重建「${clearState.name}」？不可撤销。`} confirmText="确认重建" confirmVariant="danger" loading={clearLoading} />
-        <ConfirmDialog open={deleteState.open} onClose={() => setDeleteState({ open: false, jid: '', name: '' })} onConfirm={handleDeleteConfirm} title="删除工作区" message={`确认删除「${deleteState.name}」？不可撤销。`} confirmText="删除" confirmVariant="danger" loading={deleteLoading} />
+        <ConfirmDialog
+          open={deleteState.open && !showForceDelete}
+          onClose={() => setDeleteState({ open: false, jid: '', name: '' })}
+          onConfirm={handleDeleteConfirm}
+          title="删除工作区"
+          message={`确认删除「${deleteState.name}」？不可撤销。`}
+          confirmText="删除"
+          confirmVariant="danger"
+          loading={deleteLoading}
+        />
+        <ConfirmDialog
+          open={deleteState.open && showForceDelete}
+          onClose={() => { setShowForceDelete(false); setConflictMessage(''); setDeleteState({ open: false, jid: '', name: '' }); }}
+          onConfirm={handleForceDeleteConfirm}
+          title="存在绑定关系"
+          message={conflictMessage}
+          confirmText="强制删除并解绑"
+          confirmVariant="danger"
+          loading={deleteLoading}
+        />
     </TooltipProvider>
   );
 }

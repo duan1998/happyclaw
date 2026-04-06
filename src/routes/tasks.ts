@@ -93,7 +93,9 @@ tasksRoutes.post('/', authMiddleware, async (c) => {
     chatJid = chatJid || homeGroup.jid;
   }
 
-  const group = getRegisteredGroup(chatJid);
+  // Virtual agent JIDs (web:xxx#agent:agentId) — validate base group + agent existence
+  const baseJid = chatJid.includes('#agent:') ? chatJid.split('#agent:')[0] : chatJid;
+  const group = getRegisteredGroup(baseJid);
   if (!group) return c.json({ error: 'Group not found' }, 404);
   if (group.folder !== groupFolder) {
     return c.json(
@@ -218,7 +220,11 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
 
   // Auto-recalculate next_run when schedule changes (avoid pulling cron-parser into frontend)
   const patchData = { ...validation.data };
-  if (patchData.schedule_type !== undefined || patchData.schedule_value !== undefined) {
+  const needsNextRunRecalc =
+    patchData.schedule_type !== undefined ||
+    patchData.schedule_value !== undefined ||
+    (patchData.status === 'active' && existing.status === 'completed');
+  if (needsNextRunRecalc) {
     const schedType = patchData.schedule_type ?? existing.schedule_type;
     const schedValue = patchData.schedule_value ?? existing.schedule_value;
     try {
@@ -233,11 +239,7 @@ tasksRoutes.patch('/:id', authMiddleware, async (c) => {
         }
         patchData.next_run = new Date(Date.now() + ms).toISOString();
       } else if (schedType === 'once') {
-        const ts = Date.parse(schedValue);
-        if (isNaN(ts)) {
-          return c.json({ error: 'Invalid once schedule value' }, 400);
-        }
-        patchData.next_run = new Date(ts).toISOString();
+        patchData.next_run = new Date().toISOString();
       }
     } catch {
       return c.json({ error: 'Invalid schedule value for the given schedule type' }, 400);
@@ -439,10 +441,28 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
     return c.json({ error: '请输入任务描述' }, 400);
   }
   const notifyChannels: string[] | null = body.notify_channels ?? null;
+  const contextMode: 'group' | 'isolated' =
+    body.context_mode === 'isolated' ? 'isolated' : 'group';
 
-  // Resolve home group
+  // Resolve target group: use provided group_folder/chat_jid or fall back to home group
   const homeGroup = getUserHomeGroup(authUser.id);
   if (!homeGroup) return c.json({ error: 'Home group not found' }, 400);
+
+  let groupFolder = typeof body.group_folder === 'string' && body.group_folder ? body.group_folder : homeGroup.folder;
+  let chatJid = typeof body.chat_jid === 'string' && body.chat_jid ? body.chat_jid : homeGroup.jid;
+
+  // Validate that the provided group_folder/chat_jid are accessible
+  if (body.group_folder || body.chat_jid) {
+    const baseJid = chatJid.includes('#agent:') ? chatJid.split('#agent:')[0] : chatJid;
+    const targetGroup = getRegisteredGroup(baseJid);
+    if (!targetGroup) {
+      groupFolder = homeGroup.folder;
+      chatJid = homeGroup.jid;
+    } else if (!canAccessGroup({ id: authUser.id, role: authUser.role }, targetGroup)) {
+      groupFolder = homeGroup.folder;
+      chatJid = homeGroup.jid;
+    }
+  }
 
   const taskId = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -453,12 +473,12 @@ tasksRoutes.post('/ai', authMiddleware, async (c) => {
   // Create task immediately with 'parsing' status and description as prompt
   createTask({
     id: taskId,
-    group_folder: homeGroup.folder,
-    chat_jid: homeGroup.jid,
+    group_folder: groupFolder,
+    chat_jid: chatJid,
     prompt: description,
     schedule_type: 'cron',
-    schedule_value: '0 0 * * *', // placeholder, will be updated after parsing
-    context_mode: 'group',
+    schedule_value: '0 0 * * *',
+    context_mode: contextMode,
     execution_type: 'agent',
     execution_mode: taskExecutionMode,
     script_command: null,
