@@ -115,7 +115,7 @@ Write-Host "[3b/6] Extracting MinGit..." -ForegroundColor Yellow
 $mingitDir = Join-Path $out "mingit"
 New-Item -ItemType Directory -Path $mingitDir | Out-Null
 Expand-Archive -Path $mgCachedZip -DestinationPath $mingitDir -Force
-$mgGitExe = Join-Path $mingitDir "cmd" "git.exe"
+$mgGitExe = Join-Path (Join-Path $mingitDir "cmd") "git.exe"
 if (Test-Path $mgGitExe) {
     Write-Host "        mingit/cmd/git.exe ready" -ForegroundColor Green
 } else {
