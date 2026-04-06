@@ -124,6 +124,18 @@ function startBackend() {
     }
   }
 
+  // Inject bundled MinGit into PATH (production only; dev uses system git)
+  if (!isDev) {
+    const bundledGitCmd = path.join(process.resourcesPath, 'mingit', 'cmd');
+    const bundledGitExe = path.join(bundledGitCmd, 'git.exe');
+    if (fs.existsSync(bundledGitExe)) {
+      envVars.PATH = bundledGitCmd + ';' + (envVars.PATH || '');
+      console.log(`[Desktop] Bundled MinGit found: ${bundledGitExe}`);
+    } else {
+      console.log(`[Desktop] No bundled MinGit at ${bundledGitExe}, relying on system git`);
+    }
+  }
+
   serverProcess = spawn(nodePath, [entryPoint], {
     cwd,
     env: envVars,

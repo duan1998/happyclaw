@@ -88,7 +88,11 @@ const IPC_FALLBACK_POLL_MS = 5000; // 后备轮询间隔（仅防止 inotify 事
 let needsMemoryFlush = false;
 let hadCompaction = false;
 
-type DeferredIpcMessage = { text: string; images?: Array<{ data: string; mimeType?: string }> };
+type DeferredIpcMessage = {
+  text: string;
+  images?: Array<{ data: string; mimeType?: string }>;
+  turnId?: string;
+};
 
 // When runtime-affecting IPC updates arrive during an active query (model switch
 // or permission profile change), we defer those messages to the next query so
@@ -1053,6 +1057,7 @@ function shouldDrain(): boolean {
  */
 interface IpcDrainResult {
   messages: DeferredIpcMessage[];
+  turnId?: string;
   agentModel?: string;
   permissionProfile?: ContainerInput['permissionProfile'] | null;
   hasPermissionProfileUpdate?: boolean;
@@ -1115,7 +1120,12 @@ function drainIpcInput(): IpcDrainResult {
           result.messages.push({
             text: data.text,
             images: data.images,
+            turnId: typeof data.turnId === 'string' ? data.turnId : undefined,
           });
+          if (typeof data.turnId === 'string') {
+            result.turnId = data.turnId;
+            log(`[TURN] IPC file contains turnId=${data.turnId}`);
+          }
           if (data.agentModel) {
             log(`[MODEL-DEBUG] IPC file contains agentModel=${data.agentModel}`);
             result.agentModel = data.agentModel;
@@ -1203,6 +1213,7 @@ function createIpcWatcher(onFileDetected: () => void): { close: () => void } {
 function waitForIpcMessage(): Promise<{
   text: string;
   images?: Array<{ data: string; mimeType?: string }>;
+  turnId?: string;
   agentModel?: string;
   permissionProfile?: ContainerInput['permissionProfile'] | null;
   hasPermissionProfileUpdate?: boolean;
@@ -1234,7 +1245,7 @@ function waitForIpcMessage(): Promise<{
         clearInterruptRequested();
       }
 
-      const { messages, agentModel, permissionProfile, hasPermissionProfileUpdate, sandboxConfig, hasSandboxConfigUpdate } = drainIpcInput();
+      const { messages, turnId, agentModel, permissionProfile, hasPermissionProfileUpdate, sandboxConfig, hasSandboxConfigUpdate } = drainIpcInput();
 
       if (messages.length > 0) {
         const combinedText = messages.map((m) => m.text).join('\n');
@@ -1244,6 +1255,7 @@ function waitForIpcMessage(): Promise<{
         resolve({
           text: combinedText,
           images: allImages.length > 0 ? allImages : undefined,
+          turnId,
           agentModel,
           permissionProfile,
           hasPermissionProfileUpdate,
@@ -2391,7 +2403,7 @@ async function main(): Promise<void> {
           'before next query after interrupt',
           nextMessage.hasSandboxConfigUpdate ?? false,
         );
-        containerInput.turnId = generateTurnId();
+        containerInput.turnId = nextMessage.turnId || generateTurnId();
         continue;
       }
 
@@ -2593,7 +2605,7 @@ async function main(): Promise<void> {
         'before next query',
         nextMessage.hasSandboxConfigUpdate ?? false,
       );
-      containerInput.turnId = generateTurnId();
+      containerInput.turnId = nextMessage.turnId || generateTurnId();
     }
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);

@@ -44,6 +44,7 @@ HappyClaw 是一个自托管的多用户 AI Agent 系统：
 | `src/runtime-config.ts` | 配置存储：AES-256-GCM 加密、分层配置（容器级 > 全局 > 环境变量）、变更审计日志 |
 | `src/task-scheduler.ts` | 定时调度：60s 轮询、cron / interval / once 三种模式、group / isolated 上下文 |
 | `src/file-manager.ts` | 文件安全：路径遍历防护、符号链接检测、系统路径保护（`logs/`、`CLAUDE.md`、`.claude/`、`conversations/`） |
+| `src/change-history.ts` | 变更历史：Shadow Git 引擎（快照、diff、还原），agent 执行前后自动打快照 |
 | `src/mount-security.ts` | 挂载安全：白名单校验、黑名单模式匹配（`.ssh`、`.gnupg` 等）、非主会话只读强制 |
 | `src/db.ts` | 数据层：SQLite WAL 模式、Schema 版本校验（v1→v24）、核心表定义 |
 | `src/auth.ts` | 密码工具：bcrypt 哈希/验证、Session Token 生成、用户名/密码校验 |
@@ -335,6 +336,7 @@ SQLite WAL 模式，Schema 经历 v1→v24 演进（`db.ts` 中的 `SCHEMA_VERSI
 | `usage_records` | `id` | Token 用量明细（per-model 拆行，关联 user_id、group_folder、message_id） |
 | `usage_daily_summary` | `(user_id, model, date)` | 日维度用量预聚合（本地时区日期，增量 UPSERT） |
 | `user_quotas` | `user_id` | 用户配额（预留，暂不写入数据） |
+| `change_records` | `id` | 工作区变更历史（pre/post commit hash、关联 turn_id/task_id、文件变更统计） |
 
 **注意**：`registered_groups.folder` 允许重复（多个飞书群组可映射到同一 folder）。`registered_groups.is_home` 标记用户主容器。
 
@@ -375,6 +377,7 @@ data/
   streaming-buffer/                         # 流式文本磁盘缓冲（崩溃恢复用，自动清理）
   skills/{userId}/                         # 用户级 Skills 数据
   mcp-servers/{userId}/servers.json        # 用户 MCP Servers 配置
+  change-history/{folder}/shadow.git       # Shadow Git 仓库（工作区变更历史快照，自动创建）
 
 config/default-groups.json                 # 预注册群组配置
 config/mount-allowlist.json                # 容器挂载白名单
@@ -449,6 +452,12 @@ scripts/                      # 构建辅助脚本
 ### Sub-Agent
 - `GET /api/groups/:jid/agents` · `POST /api/groups/:jid/agents`（创建 Sub-Agent）
 - `DELETE /api/groups/:jid/agents/:agentId`
+
+### 变更历史
+- `GET /api/groups/:jid/change-history`（分页列表，`?limit=50&offset=0`）
+- `GET /api/groups/:jid/change-history/:recordId`（单条详情 + 变更文件列表）
+- `GET /api/groups/:jid/change-history/:recordId/diff`（完整 diff）
+- `POST /api/groups/:jid/change-history/:recordId/revert`（还原到变更前状态）
 
 ### 目录浏览
 - `GET /api/browse/directories`（列出可选目录，受挂载白名单约束）
@@ -612,6 +621,19 @@ scripts/                      # 构建辅助脚本
 - **Container 模式**：Docker 天然隔离，sandbox 主要针对 host 模式的文件系统保护
 - **已知限制**：Claude 的 `canUseTool` 是**工具调用层拦截**，仅对结构化写工具（Write/Edit/MultiEdit/NotebookEdit 等）做路径校验；Bash 命令在 `workspace_only`/`custom` 模式下不受限制（可靠解析 shell 命令不可行），`readonly` 模式下通过命令前缀白名单做 best-effort 限制。Codex CLI 的 `--sandbox` 是进程级隔离，覆盖范围更广
 - **路径安全**：`custom` 模式的 `customWritablePaths` 要求绝对路径，禁止 `..`；前端暂不暴露 `custom` 模式
+
+### 8.15 工作区变更历史（Change History）
+
+每次 Agent 执行（消息处理 / 定时任务）前后，系统自动对工作区目录做文件快照，记录变更并支持一键还原。
+
+- **实现**：Shadow Git — 在 `data/change-history/{folder}/shadow.git` 创建独立的 bare git 仓库，`GIT_WORK_TREE` 指向实际工作区目录（`customCwd` 或 `data/groups/{folder}/`），与工作区内用户自己的 `.git` 完全隔离
+- **快照时机**：`processGroupMessages()` 和 `executeTask()` 中，`runAgent()` 调用前后各执行一次 `takeSnapshot()`
+- **变更记录**：前后快照的 commit hash 存入 `change_records` 表（含文件数、新增行、删除行统计），关联 `turn_id`（消息）或 `task_id`（任务）
+- **还原流程**：`POST /api/groups/:jid/change-history/:id/revert` → 先打 pre-revert 快照 → `git checkout <pre_commit> -- .` → commit → 记录 revert 本身为新变更（可再次还原）
+- **排除规则**：`shadow.git/info/exclude` 排除 `node_modules/`、`.git/`、`dist/` 等噪声目录
+- **降级**：git 不可用时所有操作静默返回 null，不影响 Agent 正常执行
+- **清理**：删除工作区时 `cleanupFolder()` 同时删除 DB 记录和 shadow git 目录
+- **日志**：全程使用 `writeDebugLog('HISTORY', ...)` 输出调试信息
 
 ## 9. 环境变量
 

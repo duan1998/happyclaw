@@ -1195,7 +1195,25 @@ export function initDatabase(): void {
     db.exec('ALTER TABLE agents ADD COLUMN spawned_from_jid TEXT');
   }
 
-  const SCHEMA_VERSION = '35';
+  // v35 → v36: Add change_records table for workspace change history
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS change_records (
+      id TEXT PRIMARY KEY,
+      group_folder TEXT NOT NULL,
+      pre_commit TEXT NOT NULL,
+      post_commit TEXT NOT NULL,
+      turn_id TEXT,
+      task_id TEXT,
+      files_changed INTEGER NOT NULL DEFAULT 0,
+      insertions INTEGER NOT NULL DEFAULT 0,
+      deletions INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_change_records_folder_date ON change_records(group_folder, created_at);
+    CREATE INDEX IF NOT EXISTS idx_change_records_turn ON change_records(turn_id);
+  `);
+
+  const SCHEMA_VERSION = '36';
   db.prepare(
     'INSERT OR REPLACE INTO router_state (key, value) VALUES (?, ?)',
   ).run('schema_version', SCHEMA_VERSION);
@@ -2537,6 +2555,61 @@ export function deleteGroupData(jid: string, folder: string): void {
     ).run(jid);
   });
   tx();
+}
+
+// ─── Change Records (workspace change history) ────────────────────
+
+export interface ChangeRecord {
+  id: string;
+  group_folder: string;
+  pre_commit: string;
+  post_commit: string;
+  turn_id: string | null;
+  task_id: string | null;
+  files_changed: number;
+  insertions: number;
+  deletions: number;
+  created_at: string;
+}
+
+export function insertChangeRecord(record: ChangeRecord): void {
+  db.prepare(
+    `INSERT INTO change_records (id, group_folder, pre_commit, post_commit, turn_id, task_id, files_changed, insertions, deletions, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    record.id,
+    record.group_folder,
+    record.pre_commit,
+    record.post_commit,
+    record.turn_id,
+    record.task_id,
+    record.files_changed,
+    record.insertions,
+    record.deletions,
+    record.created_at,
+  );
+}
+
+export function getChangeRecords(
+  folder: string,
+  limit: number,
+  offset: number,
+): ChangeRecord[] {
+  return db
+    .prepare(
+      `SELECT * FROM change_records WHERE group_folder = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    )
+    .all(folder, limit, offset) as ChangeRecord[];
+}
+
+export function getChangeRecordById(id: string): ChangeRecord | undefined {
+  return db
+    .prepare(`SELECT * FROM change_records WHERE id = ?`)
+    .get(id) as ChangeRecord | undefined;
+}
+
+export function deleteChangeRecordsByFolder(folder: string): void {
+  db.prepare('DELETE FROM change_records WHERE group_folder = ?').run(folder);
 }
 
 // --- User pinned groups ---

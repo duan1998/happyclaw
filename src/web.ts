@@ -55,6 +55,7 @@ import { usage as usageRoutes } from './routes/usage.js';
 import billingRoutes from './routes/billing.js';
 import bugReportRoutes from './routes/bug-report.js';
 import commandRoutes from './routes/commands.js';
+import changeHistoryRoutes from './routes/change-history.js';
 import {
   checkBillingAccess,
   formatBillingAccessDeniedMessage,
@@ -73,6 +74,8 @@ import {
   isGroupShared,
   getUserById,
 } from './db.js';
+import { resolveWorkDir, takeSnapshot } from './change-history.js';
+import { registerPendingChangeTurn } from './change-history-runtime.js';
 import { isSessionExpired } from './auth.js';
 import type {
   NewMessage,
@@ -184,6 +187,7 @@ app.route('/api/billing', billingRoutes);
 app.route('/api/bug-report', bugReportRoutes);
 app.route('/api/groups', commandRoutes); // Workspace commands under /api/groups/:jid/commands
 app.route('/api/commands', commandRoutes); // Global commands under /api/commands/global
+app.route('/api/groups', changeHistoryRoutes); // Change history under /api/groups/:jid/change-history
 
 // --- POST /api/messages ---
 
@@ -349,6 +353,16 @@ async function handleWebUserMessage(
   let pipedToActive = false;
   const images = toAgentImages(normalizedAttachments);
   const updateRoute = deps.updateReplyRoute;
+  let ipcPreSnapshotHash: string | null = null;
+  try {
+    ipcPreSnapshotHash = await takeSnapshot(
+      group.folder,
+      resolveWorkDir(group),
+      `pre:${messageId}`,
+    );
+  } catch {
+    // best-effort only — message flow must not fail because history snapshot failed
+  }
   const sendResult = deps.queue.sendMessage(
     chatJid,
     formatted,
@@ -361,8 +375,18 @@ async function handleWebUserMessage(
     group.default_model || undefined,
     group.permissionProfile ?? null,
     group.sandboxConfig ?? null,
+    messageId,
   );
   if (sendResult === 'sent') {
+    if (ipcPreSnapshotHash) {
+      registerPendingChangeTurn(
+        group.folder,
+        resolveWorkDir(group),
+        messageId,
+        ipcPreSnapshotHash,
+        { turnId: messageId },
+      );
+    }
     pipedToActive = true;
   } else {
     deps.queue.enqueueMessageCheck(chatJid);
@@ -466,15 +490,38 @@ async function handleAgentConversationMessage(
 
   // Try to pipe into running agent process
   const agentImages = toAgentImages(normalizedAttachments);
+  const agentGroup = getRegisteredGroup(chatJid);
+  let agentIpcPreSnapshotHash: string | null = null;
+  if (agentGroup) {
+    try {
+      agentIpcPreSnapshotHash = await takeSnapshot(
+        agentGroup.folder,
+        resolveWorkDir(agentGroup),
+        `pre:${messageId}`,
+      );
+    } catch {
+      // best-effort only — don't block conversation messages on history failures
+    }
+  }
   const agentSendResult = deps.queue.sendMessage(
     virtualChatJid,
     formatted,
     agentImages,
     undefined,
     agent.agent_model || undefined,
-    getRegisteredGroup(chatJid)?.permissionProfile ?? null,
-    getRegisteredGroup(chatJid)?.sandboxConfig ?? null,
+    agentGroup?.permissionProfile ?? null,
+    agentGroup?.sandboxConfig ?? null,
+    messageId,
   );
+  if (agentSendResult === 'sent' && agentGroup && agentIpcPreSnapshotHash) {
+    registerPendingChangeTurn(
+      agentGroup.folder,
+      resolveWorkDir(agentGroup),
+      messageId,
+      agentIpcPreSnapshotHash,
+      { turnId: messageId },
+    );
+  }
   if (agentSendResult === 'no_active') {
     // No running process — force close any stale state and start fresh.
     // Mirrors the reliable IM path in buildOnAgentMessage() (#240).

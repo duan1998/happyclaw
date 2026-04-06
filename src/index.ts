@@ -160,6 +160,16 @@ import {
 } from './types.js';
 import { logger } from './logger.js';
 import { writeDebugLog } from './debug-log.js';
+import {
+  takeSnapshot,
+  resolveWorkDir,
+} from './change-history.js';
+import {
+  cleanupPendingTurnsForFolder,
+  finalizePendingChangeTurn,
+  finalizeUnregisteredTurn,
+  registerPendingChangeTurn,
+} from './change-history-runtime.js';
 import { resolveTaskOwner } from './task-utils.js';
 import {
   ensureAgentDirectories,
@@ -2952,6 +2962,28 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     | { status: 'success' | 'error' | 'closed'; error?: string }
     | undefined;
   let activeSessionId = getSession(effectiveGroup.folder) || undefined;
+
+  // ── Change History: pre-execution snapshot ──
+  const chWorkDir = resolveWorkDir(effectiveGroup);
+  const initialTurnId = lastProcessed.id;
+  try {
+    const preSnapshotHash = await takeSnapshot(
+      effectiveGroup.folder,
+      chWorkDir,
+      `pre:${initialTurnId}`,
+    );
+    writeDebugLog('HISTORY', `pre-snapshot for ${effectiveGroup.folder}: ${preSnapshotHash?.slice(0, 8) ?? 'null'}`);
+    registerPendingChangeTurn(
+      effectiveGroup.folder,
+      chWorkDir,
+      initialTurnId,
+      preSnapshotHash,
+      { turnId: initialTurnId },
+    );
+  } catch (err: any) {
+    writeDebugLog('HISTORY', `pre-snapshot FAILED for ${effectiveGroup.folder}: ${err.message}`);
+  }
+
   try {
     output = await runAgent(
       effectiveGroup,
@@ -3475,6 +3507,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
             hadError = true;
             if (result.error) lastError = result.error;
           }
+          if (result.status !== 'stream') {
+            const turnIdToFinalize = result.turnId || initialTurnId;
+            const rec = await finalizePendingChangeTurn(
+              effectiveGroup.folder,
+              turnIdToFinalize,
+              `turn-finished:${result.status}`,
+            );
+            if (!rec && result.turnId && result.turnId !== initialTurnId) {
+              await finalizeUnregisteredTurn(
+                effectiveGroup.folder,
+                chWorkDir,
+                result.turnId,
+                `unregistered-turn:${result.status}`,
+              );
+            }
+          }
         } catch (err) {
           logger.error({ group: group.name, err }, 'onOutput callback failed');
           hadError = true;
@@ -3483,9 +3531,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       imagesForAgent,
     );
   } finally {
+    await finalizePendingChangeTurn(
+      effectiveGroup.folder,
+      initialTurnId,
+      'runner-finally',
+    );
+    await cleanupPendingTurnsForFolder(effectiveGroup.folder, 'runner-finally');
+
     await setTyping(chatJid, false);
-    // Always clear ack reaction in finally — covers error/interrupt/abort paths
-    // where the normal sendMessage (which clears it) is never called.
     imManager.clearAckReaction(chatJid);
     if (idleTimer) clearTimeout(idleTimer);
     activeRouteUpdaters.delete(effectiveGroup.folder);
@@ -5676,6 +5729,32 @@ async function processAgentConversation(
   // Get or use agent-specific session
   const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
   let currentAgentSessionId = sessionId;
+  let finalAgentOutput: ContainerOutput | undefined;
+  const agentChWorkDir = resolveWorkDir(effectiveGroup);
+  const initialAgentTurnId = lastProcessed.id;
+  try {
+    const preSnapshotHash = await takeSnapshot(
+      effectiveGroup.folder,
+      agentChWorkDir,
+      `pre:${initialAgentTurnId}`,
+    );
+    writeDebugLog(
+      'HISTORY',
+      `[agent] pre-snapshot for ${effectiveGroup.folder}: ${preSnapshotHash?.slice(0, 8) ?? 'null'}`,
+    );
+    registerPendingChangeTurn(
+      effectiveGroup.folder,
+      agentChWorkDir,
+      initialAgentTurnId,
+      preSnapshotHash,
+      { turnId: initialAgentTurnId },
+    );
+  } catch (err: any) {
+    writeDebugLog(
+      'HISTORY',
+      `[agent] pre-snapshot FAILED for ${effectiveGroup.folder}: ${err.message}`,
+    );
+  }
 
   const wrappedOnOutput = async (output: ContainerOutput) => {
     // Track session
@@ -6011,6 +6090,22 @@ async function processAgentConversation(
       hadError = true;
       if (output.error) lastError = output.error;
     }
+    if (output.status !== 'stream') {
+      const agentTurnIdToFinalize = output.turnId || initialAgentTurnId;
+      const agentRec = await finalizePendingChangeTurn(
+        effectiveGroup.folder,
+        agentTurnIdToFinalize,
+        `[agent] turn-finished:${output.status}`,
+      );
+      if (!agentRec && output.turnId && output.turnId !== initialAgentTurnId) {
+        await finalizeUnregisteredTurn(
+          effectiveGroup.folder,
+          agentChWorkDir,
+          output.turnId,
+          `[agent] unregistered-turn:${output.status}`,
+        );
+      }
+    }
   };
 
   ipcWatcherManager?.watchGroup(effectiveGroup.folder);
@@ -6103,6 +6198,7 @@ async function processAgentConversation(
         ownerHomeFolder,
       );
     }
+    finalAgentOutput = output;
 
     // Finalize session
     if (output.newSessionId && output.status !== 'error') {
@@ -6152,6 +6248,12 @@ async function processAgentConversation(
     hadError = true;
     logger.error({ agentId, chatJid, err }, 'Agent conversation error');
   } finally {
+    await finalizePendingChangeTurn(
+      effectiveGroup.folder,
+      finalAgentOutput?.turnId || initialAgentTurnId,
+      '[agent] runner-finally',
+    );
+    await cleanupPendingTurnsForFolder(effectiveGroup.folder, '[agent] runner-finally');
     if (idleTimer) clearTimeout(idleTimer);
 
     const wasInterrupted = agentStreamInterrupted && !cursorCommitted;
@@ -6482,6 +6584,26 @@ async function startMessageLoop(): Promise<void> {
 
           const images = collectMessageImages(chatJid, messagesToSend);
           const imagesForAgent = images.length > 0 ? images : undefined;
+          const ipcTurnId = messagesToSend[messagesToSend.length - 1]?.id;
+          let ipcPreSnapshotHash: string | null = null;
+          if (ipcTurnId) {
+            try {
+              ipcPreSnapshotHash = await takeSnapshot(
+                group.folder,
+                resolveWorkDir(group),
+                `pre:${ipcTurnId}`,
+              );
+              writeDebugLog(
+                'HISTORY',
+                `pre-snapshot for ${group.folder}: ${ipcPreSnapshotHash?.slice(0, 8) ?? 'null'} (ipc-turn)`,
+              );
+            } catch (err: any) {
+              writeDebugLog(
+                'HISTORY',
+                `pre-snapshot FAILED for ${group.folder}: ${err.message} (ipc-turn)`,
+              );
+            }
+          }
 
           // Determine the IM source JID for route update on successful injection
           const lastSourceJidForRoute =
@@ -6499,8 +6621,18 @@ async function startMessageLoop(): Promise<void> {
             group.default_model || undefined,
             group.permissionProfile ?? null,
             group.sandboxConfig ?? null,
+            ipcTurnId,
           );
           if (sendResult === 'sent') {
+            if (ipcTurnId && ipcPreSnapshotHash) {
+              registerPendingChangeTurn(
+                group.folder,
+                resolveWorkDir(group),
+                ipcTurnId,
+                ipcPreSnapshotHash,
+                { turnId: ipcTurnId },
+              );
+            }
             logger.debug(
               {
                 chatJid,
@@ -7051,6 +7183,7 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
         missedMessages.length > 0 ? formatMessages(missedMessages, false) : '';
       const images = collectMessageImages(virtualChatJid, missedMessages);
       const imagesForAgent = images.length > 0 ? images : undefined;
+      const ipcTurnId = missedMessages[missedMessages.length - 1]?.id;
 
       const sendResult = formatted
         ? queue.sendMessage(
@@ -7061,6 +7194,7 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
             agent?.agent_model || undefined,
             group.permissionProfile ?? null,
             group.sandboxConfig ?? null,
+            ipcTurnId,
           )
         : 'no_active';
       if (sendResult === 'no_active') {

@@ -5,6 +5,7 @@
 
 .DESCRIPTION
   1. Downloads portable Node.js for Windows (if not cached)
+  1b. Downloads MinGit for Windows (busybox variant, if not cached)
   2. Copies runtime files (dist, node_modules, config, container, web/dist, etc.)
   3. Includes HappyClaw.bat launcher
   4. Creates .env.example for colleagues to fill in API keys
@@ -17,6 +18,7 @@
 param(
     [switch]$NoZip,
     [string]$NodeVersion = "",
+    [string]$MinGitVersion = "2.53.0.2",
     [string]$OutputDir = "happyclaw-portable"
 )
 
@@ -36,6 +38,7 @@ if (!$NodeVersion) {
 Write-Host "=== HappyClaw Portable Packager ===" -ForegroundColor Cyan
 Write-Host "Root: $root"
 Write-Host "Node: v$NodeVersion"
+Write-Host "MinGit: v$MinGitVersion"
 Write-Host ""
 
 # --- 1. Download portable Node.js ---
@@ -47,24 +50,43 @@ $cachedZip = Join-Path $cacheDir $nodeZip
 if (!(Test-Path $cacheDir)) { New-Item -ItemType Directory -Path $cacheDir | Out-Null }
 
 if (!(Test-Path $cachedZip)) {
-    Write-Host "[1/5] Downloading Node.js v$NodeVersion..." -ForegroundColor Yellow
+    Write-Host "[1/6] Downloading Node.js v$NodeVersion..." -ForegroundColor Yellow
     Invoke-WebRequest -Uri $nodeUrl -OutFile $cachedZip -UseBasicParsing
     Write-Host "       Downloaded to $cachedZip"
 } else {
-    Write-Host "[1/5] Node.js v$NodeVersion already cached." -ForegroundColor Green
+    Write-Host "[1/6] Node.js v$NodeVersion already cached." -ForegroundColor Green
+}
+
+# --- 1b. Download MinGit for Windows (busybox variant) ---
+$mgParts = $MinGitVersion -split '\.'
+if ($mgParts.Count -le 3) {
+    $mgTag = "v$MinGitVersion.windows.1"
+} else {
+    $mgTag = "v$($mgParts[0]).$($mgParts[1]).$($mgParts[2]).windows.$($mgParts[3])"
+}
+$mgZip = "MinGit-${MinGitVersion}-busybox-64-bit.zip"
+$mgUrl = "https://github.com/git-for-windows/git/releases/download/$mgTag/$mgZip"
+$mgCachedZip = Join-Path $cacheDir $mgZip
+
+if (!(Test-Path $mgCachedZip)) {
+    Write-Host "[1b/6] Downloading MinGit v$MinGitVersion..." -ForegroundColor Yellow
+    Invoke-WebRequest -Uri $mgUrl -OutFile $mgCachedZip -UseBasicParsing
+    Write-Host "        Downloaded to $mgCachedZip"
+} else {
+    Write-Host "[1b/6] MinGit v$MinGitVersion already cached." -ForegroundColor Green
 }
 
 # --- 2. Prepare output directory ---
 $out = Join-Path $root $OutputDir
 if (Test-Path $out) {
-    Write-Host "[2/5] Cleaning previous output..." -ForegroundColor Yellow
+    Write-Host "[2/6] Cleaning previous output..." -ForegroundColor Yellow
     Remove-Item -Recurse -Force $out
 }
 New-Item -ItemType Directory -Path $out | Out-Null
-Write-Host "[2/5] Output: $out" -ForegroundColor Green
+Write-Host "[2/6] Output: $out" -ForegroundColor Green
 
 # --- 3. Extract Node.js (just node.exe) ---
-Write-Host "[3/5] Extracting Node.js..." -ForegroundColor Yellow
+Write-Host "[3/6] Extracting Node.js..." -ForegroundColor Yellow
 $nodeDir = Join-Path $out "node"
 New-Item -ItemType Directory -Path $nodeDir | Out-Null
 
@@ -88,8 +110,20 @@ if (Test-Path $npxCmd) { Copy-Item $npxCmd (Join-Path $nodeDir "npx.cmd") }
 Remove-Item -Recurse -Force $tempExtract
 Write-Host "       node.exe ready" -ForegroundColor Green
 
+# --- 3b. Extract MinGit ---
+Write-Host "[3b/6] Extracting MinGit..." -ForegroundColor Yellow
+$mingitDir = Join-Path $out "mingit"
+New-Item -ItemType Directory -Path $mingitDir | Out-Null
+Expand-Archive -Path $mgCachedZip -DestinationPath $mingitDir -Force
+$mgGitExe = Join-Path $mingitDir "cmd" "git.exe"
+if (Test-Path $mgGitExe) {
+    Write-Host "        mingit/cmd/git.exe ready" -ForegroundColor Green
+} else {
+    Write-Host "        [WARN] git.exe not found at expected path: $mgGitExe" -ForegroundColor Red
+}
+
 # --- 4. Copy runtime files ---
-Write-Host "[4/5] Copying runtime files..." -ForegroundColor Yellow
+Write-Host "[4/6] Copying runtime files..." -ForegroundColor Yellow
 
 $filesToCopy = @(
     "dist",
@@ -162,14 +196,14 @@ Write-Host "       + .env.example" -ForegroundColor DarkGreen
 
 # --- 5. Optionally create zip ---
 if (!$NoZip) {
-    Write-Host "[5/5] Creating zip..." -ForegroundColor Yellow
+    Write-Host "[5/6] Creating zip..." -ForegroundColor Yellow
     $zipPath = Join-Path $root "$OutputDir.zip"
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     Compress-Archive -Path $out -DestinationPath $zipPath -CompressionLevel Optimal
     $sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
     Write-Host "       Created: $zipPath ($sizeMB MB)" -ForegroundColor Green
 } else {
-    Write-Host "[5/5] Skipping zip (use without -NoZip to create)." -ForegroundColor DarkGray
+    Write-Host "[5/6] Skipping zip (use without -NoZip to create)." -ForegroundColor DarkGray
 }
 
 Write-Host ""

@@ -42,6 +42,13 @@ import { logger } from './logger.js';
 import { resolveTaskOwner } from './task-utils.js';
 import { removeFlowArtifacts } from './file-manager.js';
 import { hasScriptCapacity, runScript } from './script-runner.js';
+import { resolveWorkDir } from './change-history.js';
+import {
+  cleanupPendingTurnsForFolder,
+  finalizePendingChangeTurn,
+  registerPendingChangeTurn,
+} from './change-history-runtime.js';
+import { writeDebugLog } from './debug-log.js';
 import type { StreamEvent } from './stream-event.types.js';
 import { ExecutionMode, RegisteredGroup, ScheduledTask } from './types.js';
 import { checkBillingAccessFresh, isBillingEnabled } from './billing.js';
@@ -379,6 +386,31 @@ async function runTask(
     }, getSystemSettings().idleTimeout);
   };
 
+  // ── Change History: pre-execution snapshot (via shared runtime) ──
+  const chWorkDir = resolveWorkDir(workspaceGroup);
+  const taskTurnId = `task:${task.id}`;
+  {
+    const { takeSnapshot } = await import('./change-history.js');
+    let preSnapshotHash: string | null = null;
+    try {
+      preSnapshotHash = await takeSnapshot(
+        workspace.folder,
+        chWorkDir,
+        `pre-task:${task.id}`,
+      );
+      writeDebugLog('HISTORY', `[task] pre-snapshot folder=${workspace.folder} task=${task.id}: ${preSnapshotHash?.slice(0, 8) ?? 'null'}`);
+    } catch (err: any) {
+      writeDebugLog('HISTORY', `[task] pre-snapshot FAILED folder=${workspace.folder}: ${err.message}`);
+    }
+    registerPendingChangeTurn(
+      workspace.folder,
+      chWorkDir,
+      taskTurnId,
+      preSnapshotHash,
+      { taskId: task.id },
+    );
+  }
+
   try {
     const executionMode = resolveTaskExecutionMode(task, deps);
     const runAgent =
@@ -430,6 +462,11 @@ async function runTask(
         // Finalize run log on first non-stream output (success/error/closed).
         // Don't wait for the process to exit — idle timeout can be very long.
         if (streamedOutput.status !== 'stream') {
+          await finalizePendingChangeTurn(
+            workspace.folder,
+            taskTurnId,
+            `[task] turn-finished:${streamedOutput.status}`,
+          );
           finalizeRunLog();
         }
       },
@@ -460,6 +497,9 @@ async function runTask(
     lastOutputTime = Date.now();
     logger.error({ taskId: task.id, error }, 'Task failed');
   } finally {
+    await finalizePendingChangeTurn(workspace.folder, taskTurnId, '[task] runner-finally');
+    await cleanupPendingTurnsForFolder(workspace.folder, '[task] runner-finally');
+
     runningTaskIds.delete(task.id);
     // Clean up isolated task IPC directory
     if (options?.taskRunId) {

@@ -272,6 +272,11 @@ export class GroupQueue {
     return state?.activeRunnerIsTask === true;
   }
 
+  /** Whether the group (or a sibling sharing the same serialization key) is running. */
+  isGroupActive(groupJid: string): boolean {
+    return this.findActiveRunnerFor(groupJid) !== null;
+  }
+
   markRunnerActivity(groupJid: string): void {
     const state = this.resolveActiveState(groupJid);
     if (!state?.active) return;
@@ -463,6 +468,7 @@ export class GroupQueue {
     agentModel?: string,
     permissionProfile?: PermissionProfilePayload,
     sandboxConfig?: SandboxConfigPayload,
+    turnId?: string,
   ): SendMessageResult {
     const state = this.resolveActiveState(groupJid);
     if (!state) return 'no_active';
@@ -502,6 +508,7 @@ export class GroupQueue {
       if (agentModel) ipcPayload.agentModel = agentModel;
       if (permissionProfile !== undefined) ipcPayload.permissionProfile = permissionProfile;
       if (sandboxConfig !== undefined) ipcPayload.sandboxConfig = sandboxConfig;
+      if (turnId) ipcPayload.turnId = turnId;
       writeDebugLog(
         'IPC',
         `sendMessage agentModel=${agentModel || '(none)'} permissionProfile=${
@@ -510,7 +517,7 @@ export class GroupQueue {
             : permissionProfile === null
               ? 'clear'
               : `allowed=${permissionProfile.allowedTools?.length ?? 0},disallowed=${permissionProfile.disallowedTools?.length ?? 0}`
-        } sandboxConfig=${sandboxConfig === undefined ? '(unchanged)' : JSON.stringify(sandboxConfig)} file=${filename}`,
+        } sandboxConfig=${sandboxConfig === undefined ? '(unchanged)' : JSON.stringify(sandboxConfig)} turnId=${turnId || '(none)'} file=${filename}`,
       );
       fs.writeFileSync(tempPath, JSON.stringify(ipcPayload));
       fs.renameSync(tempPath, filepath);

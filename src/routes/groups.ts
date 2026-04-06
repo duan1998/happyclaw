@@ -960,6 +960,11 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
   removeFlowArtifacts(existing.folder);
 
   try {
+    const { cleanupFolder } = await import('../change-history.js');
+    cleanupFolder(existing.folder);
+  } catch { /* non-critical */ }
+
+  try {
     const { clearCodexMemory } = await import('../codex-config.js');
     clearCodexMemory(existing.folder);
   } catch { /* non-critical */ }

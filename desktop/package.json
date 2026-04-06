@@ -77,6 +77,10 @@
       {
         "from": "../happyclaw-portable/node/node.exe",
         "to": "node/node.exe"
+      },
+      {
+        "from": "../happyclaw-portable/mingit",
+        "to": "mingit"
       }
     ]
   }

@@ -11,7 +11,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sh
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { PromptDialog } from '@/components/common/PromptDialog';
 import { NewConversationDialog } from './NewConversationDialog';
-import { ArrowLeft, FolderOpen, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Puzzle, Server, Sun, Terminal, Users, Variable, X } from 'lucide-react';
+import { ArrowLeft, FolderOpen, History, Link, MessageSquare, Monitor, Moon, MoreHorizontal, PanelRightClose, PanelRightOpen, Puzzle, Server, Sun, Terminal, Users, Variable, X } from 'lucide-react';
 import { useDisplayMode } from '../../hooks/useDisplayMode';
 import { useTheme } from '../../hooks/useTheme';
 import { cn } from '@/lib/utils';
@@ -21,6 +21,7 @@ import { TerminalPanel } from './TerminalPanel';
 import { GroupMembersPanel } from './GroupMembersPanel';
 import { WorkspaceSkillsPanel } from './WorkspaceSkillsPanel';
 import { WorkspaceMcpPanel } from './WorkspaceMcpPanel';
+import { ChangeHistoryPanel } from './ChangeHistoryPanel';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { AgentTabBar } from './AgentTabBar';
 import { ImBindingDialog } from './ImBindingDialog';
@@ -32,6 +33,7 @@ const MAIN_BINDING = '__main__' as const;
 const SIDEBAR_TABS = [
   { id: 'files' as const, icon: FolderOpen, label: '文件管理' },
   { id: 'env' as const, icon: Variable, label: '环境变量' },
+  { id: 'history' as const, icon: History, label: '变更历史' },
   { id: 'skills' as const, icon: Puzzle, label: '工作区 Skills' },
   { id: 'mcp' as const, icon: Server, label: '工作区 MCP' },
   { id: 'members' as const, icon: Users, label: '成员' },
@@ -74,7 +76,7 @@ function getCurrentSessionModel(messages?: Message[]): string | undefined {
   return undefined;
 }
 
-type SidebarTab = 'files' | 'env' | 'skills' | 'mcp' | 'members';
+type SidebarTab = 'files' | 'env' | 'history' | 'skills' | 'mcp' | 'members';
 
 interface ChatViewProps {
   groupJid: string;
@@ -171,6 +173,8 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
     }
     return true;
   });
+  const historyPanelActive =
+    (panelOpen && sidebarTab === 'history') || mobilePanel === 'history';
 
   // Fallback: if current tab is hidden, reset to files
   useEffect(() => {
@@ -795,6 +799,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
               <FilePanel groupJid={groupJid} />
             ) : sidebarTab === 'env' ? (
               <ContainerEnvPanel groupJid={groupJid} />
+            ) : sidebarTab === 'history' ? (
+              <ChangeHistoryPanel
+                groupJid={groupJid}
+                active={historyPanelActive}
+                isWaiting={isWaiting}
+              />
             ) : sidebarTab === 'skills' ? (
               <WorkspaceSkillsPanel groupJid={groupJid} />
             ) : sidebarTab === 'mcp' ? (
@@ -911,6 +921,22 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         </SheetContent>
       </Sheet>
 
+      {/* Mobile: change history sheet */}
+      <Sheet open={mobilePanel === 'history'} onOpenChange={(v) => !v && setMobilePanel(null)}>
+        <SheetContent side="bottom" className="h-[80dvh] p-0">
+          <SheetHeader className="px-4 pt-4 pb-2">
+            <SheetTitle>变更历史</SheetTitle>
+          </SheetHeader>
+          <div className="flex-1 overflow-hidden h-[calc(80dvh-56px)]">
+            <ChangeHistoryPanel
+              groupJid={groupJid}
+              active={historyPanelActive}
+              isWaiting={isWaiting}
+            />
+          </div>
+        </SheetContent>
+      </Sheet>
+
       {/* Mobile: Terminal sheet */}
       <Sheet open={mobileTerminal} onOpenChange={(v) => !v && setMobileTerminal(false)}>
         <SheetContent side="bottom" className="h-[85dvh] p-0">
@@ -971,6 +997,12 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
                 成员管理
               </button>
             )}
+            <button
+              onClick={() => { setMobileActionsOpen(false); setMobilePanel('history'); }}
+              className="w-full text-left px-4 py-3 rounded-lg border border-border hover:bg-accent transition-colors cursor-pointer text-foreground text-sm"
+            >
+              变更历史
+            </button>
             {canUseTerminal && (
               <button
                 onClick={() => {
