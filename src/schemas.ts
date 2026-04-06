@@ -195,6 +195,11 @@ export const PermissionProfileSchema = z.object({
   disallowedTools: z.array(z.string().max(200)).max(100).optional(),
 }).optional().nullable();
 
+export const WorkspaceSandboxConfigSchema = z.object({
+  mode: z.enum(['full_access', 'workspace_only', 'readonly', 'custom']),
+  customWritablePaths: z.array(z.string().max(500)).max(20).optional(),
+}).optional().nullable();
+
 export const GroupPatchSchema = z.object({
   name: z.string().min(1).max(MAX_GROUP_NAME_LEN).optional(),
   is_pinned: z.boolean().optional(),
@@ -208,6 +213,7 @@ export const GroupPatchSchema = z.object({
     return val && val.trim() ? val.trim() : undefined;
   }),
   permission_profile: PermissionProfileSchema,
+  sandbox_config: WorkspaceSandboxConfigSchema,
 });
 
 export const LoginSchema = z.object({

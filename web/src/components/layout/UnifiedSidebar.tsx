@@ -124,6 +124,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
             key={g.jid} jid={g.jid} name={g.name} folder={g.folder}
             lastMessage={g.lastMessage}
             permissionProfile={g.permission_profile}
+            sandboxConfig={g.sandbox_config}
             isShared={showCollabBadge ? g.is_shared : undefined}
             memberRole={showCollabBadge ? g.member_role : undefined}
             memberCount={showCollabBadge ? g.member_count : undefined}
@@ -256,6 +257,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                           jid={mainGroup.jid} name={mainGroup.name} folder={mainGroup.folder}
                           lastMessage={mainGroup.lastMessage}
                           permissionProfile={mainGroup.permission_profile}
+                          sandboxConfig={mainGroup.sandbox_config}
                           isActive={currentGroup === mainGroup.jid} isHome
                           isRunning={runnerStates[mainGroup.jid] === 'running'} editable
                           onSelect={handleGroupSelect}
@@ -276,6 +278,7 @@ export function UnifiedSidebar({ collapsed, onToggleCollapse }: UnifiedSidebarPr
                             key={g.jid} jid={g.jid} name={g.name} folder={g.folder}
                             lastMessage={g.lastMessage}
                             permissionProfile={g.permission_profile}
+                            sandboxConfig={g.sandbox_config}
                             isShared={g.is_shared} memberRole={g.member_role} memberCount={g.member_count}
                             isActive={currentGroup === g.jid} isHome={false} isPinned
                             isRunning={runnerStates[g.jid] === 'running'}

@@ -3994,7 +3994,11 @@ async function runAgent(
       images,
       agentModel: group.default_model || undefined,
       permissionProfile: group.permissionProfile || undefined,
+      sandboxConfig: group.sandboxConfig || undefined,
     };
+
+    writeDebugLog('SANDBOX', `[main] folder=${group.folder} runtime=${mainRuntime} executionMode=${executionMode} sandboxConfig=${JSON.stringify(group.sandboxConfig ?? null)} customCwd=${group.customCwd ?? '(default)'}`);
+
 
     if (group.permissionProfile) {
       if (mainRuntime === 'codex') {
@@ -6038,6 +6042,7 @@ async function processAgentConversation(
       agentModel: agent.agent_model || undefined,
       images: imagesForAgent,
       permissionProfile: effectiveGroup.permissionProfile || undefined,
+      sandboxConfig: effectiveGroup.sandboxConfig || undefined,
     };
 
     // Write tasks/groups snapshots
@@ -6493,6 +6498,7 @@ async function startMessageLoop(): Promise<void> {
             },
             group.default_model || undefined,
             group.permissionProfile ?? null,
+            group.sandboxConfig ?? null,
           );
           if (sendResult === 'sent') {
             logger.debug(
@@ -7054,6 +7060,7 @@ function buildOnAgentMessage(): (baseChatJid: string, agentId: string) => void {
             undefined,
             agent?.agent_model || undefined,
             group.permissionProfile ?? null,
+            group.sandboxConfig ?? null,
           )
         : 'no_active';
       if (sendResult === 'no_active') {

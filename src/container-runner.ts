@@ -119,6 +119,10 @@ export interface ContainerInput {
   agentName?: string;
   agentModel?: string;
   permissionProfile?: { allowedTools?: string[]; disallowedTools?: string[] };
+  sandboxConfig?: {
+    mode: 'full_access' | 'workspace_only' | 'readonly' | 'custom';
+    customWritablePaths?: string[];
+  };
 }
 
 export interface ContainerOutput {
@@ -1068,6 +1072,7 @@ export async function runHostAgent(
 
     // 路径映射
     hostEnv['HAPPYCLAW_WORKSPACE_GROUP'] = groupDir;
+    writeDebugLog('SANDBOX', `[host-claude] folder=${group.folder} WORKSPACE_GROUP=${groupDir} sandboxConfig=${JSON.stringify(input.sandboxConfig ?? null)}`);
     // Per-user global memory
     const ownerId = group.created_by;
     if (ownerId) {
@@ -1511,6 +1516,30 @@ export async function runCodexHostAgent(
   // cmd.exe chain which causes stdout buffering.
   const resolved = resolveCodexOnWindows(config.codexCommand || 'codex');
   const args: string[] = [...resolved.args, 'exec', '--json', '--skip-git-repo-check'];
+
+  // Workspace sandbox: map sandboxConfig to Codex CLI approval + sandbox flags.
+  // Codex exec is non-interactive — without an explicit approval mode, write operations
+  // are silently skipped (no one to approve). Every mode needs an approval flag.
+  const sbx = input.sandboxConfig;
+  writeDebugLog('SANDBOX', `[codex] folder=${group.folder} sandboxConfig=${JSON.stringify(sbx ?? null)} cwd=${group.customCwd ?? '(default)'}`);
+  if (sbx && sbx.mode === 'readonly') {
+    args.push('--sandbox', 'read-only');
+  } else if (sbx && sbx.mode === 'workspace_only') {
+    args.push('--full-auto');
+  } else if (sbx && sbx.mode === 'custom') {
+    args.push('--full-auto');
+    for (const dir of sbx.customWritablePaths || []) {
+      args.push('--add-dir', dir);
+    }
+  } else {
+    args.push('--dangerously-bypass-approvals-and-sandbox');
+  }
+  {
+    const flagsToLog = args.filter(a =>
+      a === '--full-auto' || a === '--dangerously-bypass-approvals-and-sandbox' ||
+      a === '--sandbox' || a === 'read-only' || a.startsWith('--add-dir'));
+    writeDebugLog('SANDBOX', `[codex] Approval/sandbox args for ${group.folder}: ${flagsToLog.join(' ')}`);
+  }
 
   // Resume existing session if available
   if (input.sessionId) {

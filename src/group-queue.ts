@@ -10,6 +10,7 @@ import { logger } from './logger.js';
 import { writeDebugLog } from './debug-log.js';
 export type SendMessageResult = 'sent' | 'no_active';
 type PermissionProfilePayload = { allowedTools?: string[]; disallowedTools?: string[] } | null;
+type SandboxConfigPayload = { mode: string; customWritablePaths?: string[] } | null;
 
 interface QueuedTask {
   id: string;
@@ -461,6 +462,7 @@ export class GroupQueue {
     onInjected?: () => void,
     agentModel?: string,
     permissionProfile?: PermissionProfilePayload,
+    sandboxConfig?: SandboxConfigPayload,
   ): SendMessageResult {
     const state = this.resolveActiveState(groupJid);
     if (!state) return 'no_active';
@@ -499,6 +501,7 @@ export class GroupQueue {
       const ipcPayload: Record<string, unknown> = { type: 'message', text, images };
       if (agentModel) ipcPayload.agentModel = agentModel;
       if (permissionProfile !== undefined) ipcPayload.permissionProfile = permissionProfile;
+      if (sandboxConfig !== undefined) ipcPayload.sandboxConfig = sandboxConfig;
       writeDebugLog(
         'IPC',
         `sendMessage agentModel=${agentModel || '(none)'} permissionProfile=${
@@ -507,7 +510,7 @@ export class GroupQueue {
             : permissionProfile === null
               ? 'clear'
               : `allowed=${permissionProfile.allowedTools?.length ?? 0},disallowed=${permissionProfile.disallowedTools?.length ?? 0}`
-        } file=${filename}`,
+        } sandboxConfig=${sandboxConfig === undefined ? '(unchanged)' : JSON.stringify(sandboxConfig)} file=${filename}`,
       );
       fs.writeFileSync(tempPath, JSON.stringify(ipcPayload));
       fs.renameSync(tempPath, filepath);

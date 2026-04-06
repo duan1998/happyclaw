@@ -1243,7 +1243,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         e.boundMainImGroups = apiErr.body?.bound_main_im_groups;
         throw e;
       }
-      set({ error: apiErr.message || (err instanceof Error ? err.message : String(err)) });
+      throw err;
     }
   },
 
@@ -1251,6 +1251,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   handleStreamEvent: (chatJid, event, agentId?) => {
     // Skip while clearHistory is in-flight
     if (get().clearing[chatJid]) return;
+    // Skip events for groups that no longer exist (e.g. deleted)
+    if (!agentId && !get().groups[chatJid]) return;
 
     // ⓪ text_delta / thinking_delta — rAF batch for both agent and main conversation
     if (event.eventType === 'text_delta' || event.eventType === 'thinking_delta') {
@@ -1575,6 +1577,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!wsMsg || !wsMsg.id) return;
     // Skip while clearHistory is in-flight to prevent race re-injection
     if (get().clearing[chatJid]) return;
+    // Skip messages for groups that no longer exist (e.g. deleted)
+    if (!agentId && !get().groups[chatJid]) return;
 
     const msg: Message = {
       id: wsMsg.id,

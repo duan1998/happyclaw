@@ -25,6 +25,10 @@ export interface ContainerInput {
   agentId?: string;
   agentName?: string;
   permissionProfile?: { allowedTools?: string[]; disallowedTools?: string[] };
+  sandboxConfig?: {
+    mode: 'full_access' | 'workspace_only' | 'readonly' | 'custom';
+    customWritablePaths?: string[];
+  };
 }
 
 export interface ContainerOutput {

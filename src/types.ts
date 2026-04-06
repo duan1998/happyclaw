@@ -44,6 +44,16 @@ export interface PermissionProfile {
   disallowedTools?: string[];
 }
 
+/**
+ * Per-group workspace sandbox configuration.
+ * Controls filesystem access restrictions at the OS/process level.
+ * Applied uniformly to all conversations (Claude + Codex) in the workspace.
+ */
+export interface WorkspaceSandboxConfig {
+  mode: 'full_access' | 'workspace_only' | 'readonly' | 'custom';
+  customWritablePaths?: string[];
+}
+
 export interface RegisteredGroup {
   name: string;
   folder: string;
@@ -65,6 +75,7 @@ export interface RegisteredGroup {
   default_runtime?: 'claude' | 'codex';
   default_model?: string;
   permissionProfile?: PermissionProfile;
+  sandboxConfig?: WorkspaceSandboxConfig;
 }
 
 export interface GroupMember {

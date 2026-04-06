@@ -401,6 +401,8 @@ async function runTask(
         isAdminHome,
         isScheduledTask: true,
         taskRunId: options?.taskRunId,
+        permissionProfile: workspaceGroup.permissionProfile || undefined,
+        sandboxConfig: workspaceGroup.sandboxConfig || undefined,
       },
       (proc, identifier) =>
         deps.onProcess(

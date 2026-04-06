@@ -316,10 +316,13 @@ export function ChatView({ groupJid, onBack, headerLeft }: ChatViewProps) {
         handleWsNewMessage(groupJid, data.message, data.agentId, data.source);
       }
     });
-    // WebSocket 消息校验失败时通知用户
     const unsub3 = wsManager.on('ws_error', (data: any) => {
       if (!data.chatJid || data.chatJid === groupJid) {
         showToast('发送失败', data.error || '消息格式无效', 4000);
+        useChatStore.getState().clearStreaming(groupJid);
+        useChatStore.setState((s) => ({
+          waiting: { ...s.waiting, [groupJid]: false },
+        }));
       }
     });
     // 后端推送的流式快照（WS 重连时恢复）

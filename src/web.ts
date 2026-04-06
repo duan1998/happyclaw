@@ -360,6 +360,7 @@ async function handleWebUserMessage(
     },
     group.default_model || undefined,
     group.permissionProfile ?? null,
+    group.sandboxConfig ?? null,
   );
   if (sendResult === 'sent') {
     pipedToActive = true;
@@ -472,6 +473,7 @@ async function handleAgentConversationMessage(
     undefined,
     agent.agent_model || undefined,
     getRegisteredGroup(chatJid)?.permissionProfile ?? null,
+    getRegisteredGroup(chatJid)?.sandboxConfig ?? null,
   );
   if (agentSendResult === 'no_active') {
     // No running process — force close any stale state and start fresh.
@@ -843,6 +845,7 @@ function setupWebSocket(server: any): WebSocketServer {
             session.display_name || session.username,
           );
           if (!result.ok) {
+            sendWsError(result.error || '消息发送失败', chatJid);
             logger.warn(
               { chatJid, status: result.status, error: result.error },
               'WebSocket message rejected',

@@ -323,7 +323,7 @@ SQLite WAL 模式，Schema 经历 v1→v24 演进（`db.ts` 中的 `SCHEMA_VERSI
 | `messages` | `(id, chat_jid)` | 消息历史（含 `is_from_me`、`source` 标识来源、`attachments`） |
 | `scheduled_tasks` | `id` | 定时任务（调度类型、上下文模式、状态、`execution_type`、`script_command`、`created_by`） |
 | `task_run_logs` | `id` (auto) | 任务执行日志（耗时、状态、结果） |
-| `registered_groups` | `jid` | 注册的会话（folder 映射、容器配置、执行模式、`customCwd`、`is_home`、`init_source_path`、`init_git_url`、`selected_skills`、`require_mention`、`permission_profile`） |
+| `registered_groups` | `jid` | 注册的会话（folder 映射、容器配置、执行模式、`customCwd`、`is_home`、`init_source_path`、`init_git_url`、`selected_skills`、`require_mention`、`permission_profile`、`sandbox_config`） |
 | `sessions` | `(group_folder, agent_id)` | 会话 ID 映射（Claude session 持久化，支持 Sub-Agent 独立会话） |
 | `router_state` | `key` | KV 存储（`last_timestamp`、`last_agent_timestamp`） |
 | `users` | `id` | 用户账户（密码哈希、角色、权限、状态、`ai_name`、`ai_avatar_emoji`、`ai_avatar_color`、`avatar_emoji`、`avatar_color`、`ai_avatar_url`、`deleted_at`） |
@@ -590,6 +590,28 @@ scripts/                      # 构建辅助脚本
 - **生效链路**：`src/index.ts` 构建 `ContainerInput` → `permissionProfile` 字段 → agent-runner `applyPermissionProfile()` 合并到 SDK `query()` 的 `allowedTools`/`disallowedTools`
 - **合并规则**：`profile.allowedTools` 若非空则**替换**默认工具集（`DEFAULT_ALLOWED_TOOLS`）；`profile.disallowedTools` 始终**追加**（叠加禁止）
 - **未配置时**：行为不变，使用默认工具集
+
+### 8.14 Per-group 文件访问沙箱（Workspace Sandbox）
+
+每个群组可配置 `sandbox_config`，控制该群组内所有对话（Claude + Codex，含 Sub-Agent）的文件系统访问范围。
+
+- **数据结构**：`{ mode: 'full_access' | 'workspace_only' | 'readonly' | 'custom', customWritablePaths?: string[] }`（JSON 存储在 `sandbox_config` 列）
+- **API**：通过 `PATCH /api/groups/:jid` 的 `sandbox_config` 字段设置（传 `null` 清除，等同 `full_access`）
+- **预设模式**：
+
+| 模式 | Claude 实现 | Codex 实现 | 效果 |
+|------|------------|-----------|------|
+| `full_access` | `bypassPermissions`（默认） | 不传 --sandbox 参数 | 默认行为，向后兼容 |
+| `workspace_only` | `canUseTool` 回调拦截写工具路径 | `--sandbox workspace-write` | 结构化写工具限制在工作区目录 |
+| `readonly` | `canUseTool` 拦截写工具 + Bash 白名单 | `--sandbox read-only` | 禁止写入，Bash 仅允许只读命令 |
+| `custom` | `canUseTool` 允许工作区 + 自定义路径 | `--sandbox workspace-write --add-dir <paths>` | 用户自定义可写范围 |
+
+- **Claude 生效链路**：`src/index.ts` 构建 `ContainerInput.sandboxConfig` → agent-runner `createSandboxCanUseTool()` 创建 `canUseTool` 回调 → 注入 SDK `query()` 的 `canUseTool` 选项，同时 `permissionMode` 从 `bypassPermissions` 切换到 `default`（否则 SDK 跳过所有权限回调）
+- **Codex 生效链路**：`container-runner.ts` `runCodexHostAgent()` 将 `sandboxConfig` 映射为 CLI `--sandbox` / `--add-dir` 参数
+- **继承规则**：同一工作区内所有对话（主对话 + Sub-Agent + 定时任务）继承同一 `sandbox_config`
+- **Container 模式**：Docker 天然隔离，sandbox 主要针对 host 模式的文件系统保护
+- **已知限制**：Claude 的 `canUseTool` 是**工具调用层拦截**，仅对结构化写工具（Write/Edit/MultiEdit/NotebookEdit 等）做路径校验；Bash 命令在 `workspace_only`/`custom` 模式下不受限制（可靠解析 shell 命令不可行），`readonly` 模式下通过命令前缀白名单做 best-effort 限制。Codex CLI 的 `--sandbox` 是进程级隔离，覆盖范围更广
+- **路径安全**：`custom` 模式的 `customWritablePaths` 要求绝对路径，禁止 `..`；前端暂不暴露 `custom` 模式
 
 ## 9. 环境变量
 

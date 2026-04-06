@@ -158,6 +158,7 @@ interface GroupPayloadItem {
   default_runtime?: 'claude' | 'codex';
   default_model?: string;
   permission_profile?: { allowedTools?: string[]; disallowedTools?: string[] } | null;
+  sandbox_config?: { mode: string; customWritablePaths?: string[] } | null;
 }
 
 function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
@@ -269,6 +270,7 @@ function buildGroupsPayload(user: AuthUser): Record<string, GroupPayloadItem> {
       default_runtime: group.default_runtime ?? 'claude',
       default_model: group.default_model,
       permission_profile: group.permissionProfile ?? null,
+      sandbox_config: group.sandboxConfig ?? null,
     };
   }
 
@@ -692,6 +694,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     default_runtime,
     default_model,
     permission_profile,
+    sandbox_config,
   } = validation.data;
   const name = rawName ? normalizeGroupName(rawName) : undefined;
 
@@ -703,9 +706,23 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     execution_mode === undefined &&
     default_runtime === undefined &&
     default_model === undefined &&
-    permission_profile === undefined
+    permission_profile === undefined &&
+    sandbox_config === undefined
   ) {
     return c.json({ error: 'No fields to update' }, 400);
+  }
+
+  // sandbox_config.custom 模式路径安全校验
+  if (sandbox_config && sandbox_config.mode === 'custom') {
+    const allPaths = sandbox_config.customWritablePaths || [];
+    for (const p of allPaths) {
+      if (!path.isAbsolute(p)) {
+        return c.json({ error: `Sandbox path must be absolute: ${p}` }, 400);
+      }
+      if (p.includes('..')) {
+        return c.json({ error: `Sandbox path must not contain "..": ${p}` }, 400);
+      }
+    }
   }
 
   // 不允许修改 is_home=true 的主容器执行模式（主容器由 loadState 强制管理）
@@ -732,7 +749,8 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     execution_mode === undefined &&
     default_runtime === undefined &&
     default_model === undefined &&
-    permission_profile === undefined;
+    permission_profile === undefined &&
+    sandbox_config === undefined;
   if (isPinOnly) {
     if (
       !canAccessGroup(
@@ -775,7 +793,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
   }
 
   // Update registered group if any group-level field changed
-  if (name || activation_mode !== undefined || execution_mode !== undefined || default_runtime !== undefined || default_model !== undefined || permission_profile !== undefined) {
+  if (name || activation_mode !== undefined || execution_mode !== undefined || default_runtime !== undefined || default_model !== undefined || permission_profile !== undefined || sandbox_config !== undefined) {
     const updated: RegisteredGroup = {
       name: name || existing.name,
       folder: existing.folder,
@@ -810,12 +828,23 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         permission_profile !== undefined
           ? (permission_profile ?? undefined)
           : existing.permissionProfile,
+      sandboxConfig:
+        sandbox_config !== undefined
+          ? (sandbox_config ?? undefined)
+          : existing.sandboxConfig,
     };
 
     if (permission_profile !== undefined) {
       writeDebugLog(
         'PERM_PROFILE',
         `Updated permission_profile for ${jid}: runtime=${updated.default_runtime ?? 'claude'}, allowed=${updated.permissionProfile?.allowedTools?.length ?? 0}, disallowed=${updated.permissionProfile?.disallowedTools?.length ?? 0}`,
+      );
+    }
+
+    if (sandbox_config !== undefined) {
+      writeDebugLog(
+        'SANDBOX',
+        `[PATCH] Updated sandbox_config for ${jid} (folder=${updated.folder}): ${JSON.stringify(updated.sandboxConfig ?? null)}`,
       );
     }
 
@@ -828,6 +857,10 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
     ? (permission_profile ?? null)
     : (existing.permissionProfile ?? null);
 
+  const finalSandbox = sandbox_config !== undefined
+    ? (sandbox_config ?? null)
+    : (existing.sandboxConfig ?? null);
+
   return c.json({
     success: true,
     pinned_at,
@@ -837,6 +870,7 @@ groupRoutes.patch('/:jid', authMiddleware, async (c) => {
         ? (default_model ?? undefined)
         : existing.default_model,
     permission_profile: finalProfile,
+    sandbox_config: finalSandbox,
   });
 });
 

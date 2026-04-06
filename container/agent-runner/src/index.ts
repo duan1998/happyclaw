@@ -17,7 +17,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { query, HookCallback, PreCompactHookInput, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
+import { query, HookCallback, PreCompactHookInput, PermissionResult, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 import { getChannelFromJid } from './channel-prefixes.js';
 
@@ -96,6 +96,8 @@ type DeferredIpcMessage = { text: string; images?: Array<{ data: string; mimeTyp
 let pendingDeferredMessages: DeferredIpcMessage[] | null = null;
 let pendingDeferredPermissionProfile: ContainerInput['permissionProfile'] | null | undefined;
 let pendingDeferredPermissionProfileUpdateExists = false;
+let pendingDeferredSandboxConfig: ContainerInput['sandboxConfig'] | null | undefined;
+let pendingDeferredSandboxConfigUpdateExists = false;
 // Module-level session ID so SIGTERM handler can emit it before exit.
 // Updated in main() whenever a query returns a new session.
 let latestSessionId: string | undefined;
@@ -179,6 +181,105 @@ function applyPermissionProfile(
 
   log(`[PERM_PROFILE] Final: allowed=${allowedTools.length}, disallowed=${disallowedTools?.length ?? 0}`);
   return { allowedTools, disallowedTools };
+}
+
+/**
+ * Resolve writable directories for a given sandbox config.
+ * Returns null when sandbox is disabled (full_access).
+ */
+function resolveSandboxWritableDirs(
+  config?: ContainerInput['sandboxConfig'],
+): { mode: string; writableDirs: string[] | null; denyAll: boolean } {
+  if (!config || config.mode === 'full_access') {
+    return { mode: 'full_access', writableDirs: null, denyAll: false };
+  }
+  if (config.mode === 'readonly') {
+    return { mode: 'readonly', writableDirs: [], denyAll: true };
+  }
+  const dirs = [WORKSPACE_GROUP];
+  if (fs.existsSync(WORKSPACE_GLOBAL)) dirs.push(WORKSPACE_GLOBAL);
+  if (config.mode === 'custom') {
+    dirs.push(...(config.customWritablePaths || []));
+  }
+  return { mode: config.mode, writableDirs: dirs, denyAll: false };
+}
+
+function normalizePath(p: string): string {
+  return path.resolve(p).replace(/\\/g, '/').toLowerCase();
+}
+
+function isPathUnder(filePath: string, dir: string): boolean {
+  const nf = normalizePath(filePath);
+  const nd = normalizePath(dir);
+  return nf === nd || nf.startsWith(nd + '/');
+}
+
+const WRITE_TOOL_NAMES = new Set([
+  'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
+  'FileWriteTool', 'FileEditTool', 'NotebookEditTool',
+]);
+
+const SANDBOX_GATED_TOOLS = new Set([
+  ...WRITE_TOOL_NAMES,
+  'Bash', 'BashTool',
+]);
+
+/**
+ * Create a `canUseTool` callback for SDK-level sandbox enforcement.
+ *
+ * When sandbox is active we CANNOT use `bypassPermissions` (it skips all
+ * permission callbacks and hooks). Instead we set `permissionMode: 'default'`
+ * and provide this `canUseTool` that:
+ *   1. Auto-allows everything when sandbox is disabled (simulates bypassPermissions).
+ *   2. Checks write paths against the writable-dir allowlist when sandbox is enabled.
+ */
+function createSandboxCanUseTool(config: ContainerInput['sandboxConfig'], cwd: string) {
+  const { mode, writableDirs, denyAll } = resolveSandboxWritableDirs(config);
+  const cwdNorm = normalizePath(cwd);
+  if (writableDirs && !writableDirs.some(d => normalizePath(d) === cwdNorm)) {
+    writableDirs.unshift(cwd);
+  }
+  log(`[SANDBOX] canUseTool active: mode=${mode}, writableDirs=${writableDirs?.join(', ') ?? '(unrestricted)'}, denyAll=${denyAll}, cwd=${cwd}`);
+
+  return async (toolName: string, toolInput: Record<string, unknown>): Promise<PermissionResult> => {
+    log(`[SANDBOX] canUseTool called: tool=${toolName} input_keys=${Object.keys(toolInput).join(',')}`);
+
+    if (WRITE_TOOL_NAMES.has(toolName)) {
+      const filePath = toolInput?.file_path as string | undefined
+        ?? toolInput?.path as string | undefined;
+      if (!filePath) return { behavior: 'allow' };
+
+      if (denyAll) {
+        log(`[SANDBOX] BLOCKED ${toolName} → ${filePath} (readonly mode)`);
+        return { behavior: 'deny', message: `[Sandbox] 当前工作区为只读模式，禁止写入文件: ${filePath}` };
+      }
+
+      if (writableDirs) {
+        const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath);
+        const allowed = writableDirs.some((dir) => isPathUnder(resolved, dir));
+        if (!allowed) {
+          log(`[SANDBOX] BLOCKED ${toolName} → ${filePath} (resolved=${resolved}, not under writable dirs: ${writableDirs.join(', ')})`);
+          return { behavior: 'deny', message: `[Sandbox] 文件路径不在允许的写入范围内: ${filePath}` };
+        }
+        log(`[SANDBOX] ALLOWED ${toolName} → ${filePath}`);
+      }
+      return { behavior: 'allow' };
+    }
+
+    if (toolName === 'Bash') {
+      if (denyAll) {
+        const cmd = (toolInput?.command ?? '') as string;
+        const readOnlyCmds = /^\s*(cat|head|tail|less|more|ls|dir|find|grep|rg|echo|pwd|cd|type|wc|file|stat|du|df|which|where|env|set|get-content|select-string|get-childitem|test-path)\b/i;
+        if (!readOnlyCmds.test(cmd)) {
+          log(`[SANDBOX] BLOCKED Bash (readonly mode): ${cmd.slice(0, 100)}`);
+          return { behavior: 'deny', message: `[Sandbox] 当前工作区为只读模式，仅允许只读命令` };
+        }
+      }
+      return { behavior: 'allow' };
+    }
+
+    return { behavior: 'allow' };
+  };
 }
 
 const MEMORY_FLUSH_ALLOWED_TOOLS = [
@@ -955,6 +1056,8 @@ interface IpcDrainResult {
   agentModel?: string;
   permissionProfile?: ContainerInput['permissionProfile'] | null;
   hasPermissionProfileUpdate?: boolean;
+  sandboxConfig?: ContainerInput['sandboxConfig'] | null;
+  hasSandboxConfigUpdate?: boolean;
 }
 
 function applyPendingAgentModel(agentModel: string | undefined, context: string): void {
@@ -985,6 +1088,17 @@ function applyPendingPermissionProfile(
   log(`[PERM_PROFILE] Applied IPC update (${context}): ${summarizePermissionProfile(permissionProfile, true)}`);
 }
 
+function applyPendingSandboxConfig(
+  containerInput: ContainerInput,
+  sandboxConfig: ContainerInput['sandboxConfig'] | null | undefined,
+  context: string,
+  hasUpdate = true,
+): void {
+  if (!hasUpdate) return;
+  containerInput.sandboxConfig = sandboxConfig ?? undefined;
+  log(`[SANDBOX] Applied IPC update (${context}): ${JSON.stringify(sandboxConfig)}`);
+}
+
 function drainIpcInput(): IpcDrainResult {
   const result: IpcDrainResult = { messages: [] };
   try {
@@ -1010,6 +1124,11 @@ function drainIpcInput(): IpcDrainResult {
             result.permissionProfile = (data.permissionProfile ?? null) as ContainerInput['permissionProfile'] | null;
             result.hasPermissionProfileUpdate = true;
             log(`[PERM_PROFILE] IPC file contains permissionProfile=${summarizePermissionProfile(result.permissionProfile, true)}`);
+          }
+          if (Object.prototype.hasOwnProperty.call(data, 'sandboxConfig')) {
+            result.sandboxConfig = (data.sandboxConfig ?? null) as ContainerInput['sandboxConfig'] | null;
+            result.hasSandboxConfigUpdate = true;
+            log(`[SANDBOX] IPC file contains sandboxConfig=${JSON.stringify(result.sandboxConfig)}`);
           }
         }
       } catch (err) {
@@ -1087,6 +1206,8 @@ function waitForIpcMessage(): Promise<{
   agentModel?: string;
   permissionProfile?: ContainerInput['permissionProfile'] | null;
   hasPermissionProfileUpdate?: boolean;
+  sandboxConfig?: ContainerInput['sandboxConfig'] | null;
+  hasSandboxConfigUpdate?: boolean;
 } | null> {
   return new Promise((resolve) => {
     let resolved = false;
@@ -1113,7 +1234,7 @@ function waitForIpcMessage(): Promise<{
         clearInterruptRequested();
       }
 
-      const { messages, agentModel, permissionProfile, hasPermissionProfileUpdate } = drainIpcInput();
+      const { messages, agentModel, permissionProfile, hasPermissionProfileUpdate, sandboxConfig, hasSandboxConfigUpdate } = drainIpcInput();
 
       if (messages.length > 0) {
         const combinedText = messages.map((m) => m.text).join('\n');
@@ -1126,6 +1247,8 @@ function waitForIpcMessage(): Promise<{
           agentModel,
           permissionProfile,
           hasPermissionProfileUpdate,
+          sandboxConfig,
+          hasSandboxConfigUpdate,
         });
         return;
       }
@@ -1378,9 +1501,9 @@ async function runQuery(
       return; // No setTimeout needed — watcher will trigger next check on file change
     }
 
-    const { messages, agentModel, permissionProfile, hasPermissionProfileUpdate } = drainIpcInput();
+    const { messages, agentModel, permissionProfile, hasPermissionProfileUpdate, sandboxConfig, hasSandboxConfigUpdate } = drainIpcInput();
     const hasModelSwitch = !!agentModel && agentModel !== CLAUDE_MODEL;
-    if ((hasModelSwitch || hasPermissionProfileUpdate) && messages.length > 0) {
+    if ((hasModelSwitch || hasPermissionProfileUpdate || hasSandboxConfigUpdate) && messages.length > 0) {
       if (hasModelSwitch) {
         log(`Model switched during active query: ${CLAUDE_MODEL} -> ${agentModel}, deferring ${messages.length} message(s) to next query while preserving session`);
         CLAUDE_MODEL = agentModel!;
@@ -1389,6 +1512,11 @@ async function runQuery(
         pendingDeferredPermissionProfile = permissionProfile;
         pendingDeferredPermissionProfileUpdateExists = true;
         log(`[PERM_PROFILE] Update received during active query, deferring ${messages.length} message(s) to next query: ${summarizePermissionProfile(permissionProfile, true)}`);
+      }
+      if (hasSandboxConfigUpdate) {
+        pendingDeferredSandboxConfig = sandboxConfig;
+        pendingDeferredSandboxConfigUpdateExists = true;
+        log(`[SANDBOX] Update received during active query, deferring to next query: ${JSON.stringify(sandboxConfig)}`);
       }
       pendingDeferredMessages = messages;
       stream.end();
@@ -1402,6 +1530,9 @@ async function runQuery(
     }
     if (hasPermissionProfileUpdate) {
       applyPendingPermissionProfile(containerInput, permissionProfile, 'during query, no message', true);
+    }
+    if (hasSandboxConfigUpdate) {
+      applyPendingSandboxConfig(containerInput, sandboxConfig, 'during query, no message', true);
     }
     for (const msg of messages) {
       log(`Piping IPC message into active query (${msg.text.length} chars, ${msg.images?.length || 0} images)`);
@@ -1613,6 +1744,19 @@ async function runQuery(
     return { newSessionId, lastAssistantUuid, closedDuringQuery, interruptedDuringQuery };
   }
 
+  const sandboxActive = containerInput.sandboxConfig && containerInput.sandboxConfig.mode !== 'full_access';
+  log(`[SANDBOX] Config received: ${JSON.stringify(containerInput.sandboxConfig ?? null)}, active=${!!sandboxActive}, WORKSPACE_GROUP=${WORKSPACE_GROUP}, WORKSPACE_GLOBAL=${WORKSPACE_GLOBAL}`);
+  const sandboxCanUseTool = sandboxActive ? createSandboxCanUseTool(containerInput.sandboxConfig, WORKSPACE_GROUP) : undefined;
+
+  // When sandbox is active, remove write/bash tools from allowedTools so the SDK
+  // calls canUseTool for them instead of auto-approving.
+  const effectiveAllowedTools = sandboxActive
+    ? allowedTools.filter(t => !SANDBOX_GATED_TOOLS.has(t))
+    : allowedTools;
+  if (sandboxActive) {
+    log(`[SANDBOX] Removed ${allowedTools.length - effectiveAllowedTools.length} tools from allowedTools (${[...SANDBOX_GATED_TOOLS].filter(t => allowedTools.includes(t)).join(', ')})`);
+  }
+
   try {
     const q = query({
     prompt: stream,
@@ -1623,11 +1767,12 @@ async function runQuery(
       resume: sessionId,
       resumeSessionAt: resumeAt,
       systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const, append: systemPromptAppend },
-      allowedTools,
+      allowedTools: effectiveAllowedTools,
       ...(disallowedTools && { disallowedTools }),
       thinking: { type: 'adaptive' as const },
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
+      ...(sandboxActive
+        ? { permissionMode: 'default' as const, canUseTool: sandboxCanUseTool }
+        : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true }),
       agentProgressSummaries: true,
       settingSources: ['project', 'user'],
       includePartialMessages: true,
@@ -2055,6 +2200,12 @@ async function main(): Promise<void> {
     'before query start',
     pendingDrain.hasPermissionProfileUpdate ?? false,
   );
+  applyPendingSandboxConfig(
+    containerInput,
+    pendingDrain.sandboxConfig,
+    'before query start',
+    pendingDrain.hasSandboxConfigUpdate ?? false,
+  );
 
   // Query loop: run query -> wait for IPC message -> run new query -> repeat
   let resumeAt: string | undefined;
@@ -2196,6 +2347,14 @@ async function main(): Promise<void> {
           );
           pendingDeferredPermissionProfile = undefined;
           pendingDeferredPermissionProfileUpdateExists = false;
+          applyPendingSandboxConfig(
+            containerInput,
+            pendingDeferredSandboxConfig,
+            'deferred after interrupt',
+            pendingDeferredSandboxConfigUpdateExists,
+          );
+          pendingDeferredSandboxConfig = undefined;
+          pendingDeferredSandboxConfigUpdateExists = false;
           log(`Using ${pending.length} deferred runtime-setting message(s) after interrupt, model: ${CLAUDE_MODEL}`);
           prompt = combinedText;
           promptImages = combinedImages.length > 0 ? combinedImages : undefined;
@@ -2225,6 +2384,12 @@ async function main(): Promise<void> {
           nextMessage.permissionProfile,
           'before next query after interrupt',
           nextMessage.hasPermissionProfileUpdate ?? false,
+        );
+        applyPendingSandboxConfig(
+          containerInput,
+          nextMessage.sandboxConfig,
+          'before next query after interrupt',
+          nextMessage.hasSandboxConfigUpdate ?? false,
         );
         containerInput.turnId = generateTurnId();
         continue;
@@ -2387,6 +2552,14 @@ async function main(): Promise<void> {
         );
         pendingDeferredPermissionProfile = undefined;
         pendingDeferredPermissionProfileUpdateExists = false;
+        applyPendingSandboxConfig(
+          containerInput,
+          pendingDeferredSandboxConfig,
+          'deferred before next query',
+          pendingDeferredSandboxConfigUpdateExists,
+        );
+        pendingDeferredSandboxConfig = undefined;
+        pendingDeferredSandboxConfigUpdateExists = false;
         log(`Using ${pending.length} deferred runtime-setting message(s) (${combinedText.length} chars), model: ${CLAUDE_MODEL}`);
         prompt = combinedText;
         promptImages = combinedImages.length > 0 ? combinedImages : undefined;
@@ -2413,6 +2586,12 @@ async function main(): Promise<void> {
         nextMessage.permissionProfile,
         'before next query',
         nextMessage.hasPermissionProfileUpdate ?? false,
+      );
+      applyPendingSandboxConfig(
+        containerInput,
+        nextMessage.sandboxConfig,
+        'before next query',
+        nextMessage.hasSandboxConfigUpdate ?? false,
       );
       containerInput.turnId = generateTurnId();
     }

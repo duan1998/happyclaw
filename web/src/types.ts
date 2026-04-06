@@ -23,6 +23,10 @@ export interface GroupInfo {
     allowedTools?: string[];
     disallowedTools?: string[];
   } | null;
+  sandbox_config?: {
+    mode: 'full_access' | 'workspace_only' | 'readonly' | 'custom';
+    customWritablePaths?: string[];
+  } | null;
 }
 
 export interface AgentInfo {

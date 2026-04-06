@@ -1,11 +1,14 @@
 import { useState } from 'react';
-import { MoreHorizontal, Pencil, Trash2, RotateCcw, Star, Pin, Timer, ShieldOff, BookLock } from 'lucide-react';
+import { MoreHorizontal, Pencil, Trash2, RotateCcw, Star, Pin, Timer, Shield } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
@@ -47,12 +50,53 @@ const ALL_TOOLS = [
   'mcp__happyclaw__memory_append',
 ];
 
-function deriveToggles(profile?: GroupInfo['permission_profile']) {
-  if (!profile) return { toolsDisabled: false, readOnly: false };
-  const denied = new Set(profile.disallowedTools ?? []);
-  const toolsDisabled = ALL_TOOLS.every((t) => denied.has(t));
-  const readOnly = !toolsDisabled && WRITE_TOOLS.every((t) => denied.has(t));
-  return { toolsDisabled, readOnly };
+/**
+ * Unified protection levels — each level sets both permission_profile and sandbox_config atomically.
+ *
+ * | Level            | sandbox_config        | permission_profile          |
+ * |------------------|-----------------------|-----------------------------|
+ * | full_access      | null                  | null                        |
+ * | workspace_only   | {mode:'workspace_only'}| null                       |
+ * | readonly         | {mode:'readonly'}     | {disallowedTools: WRITE}    |
+ * | tools_disabled   | null                  | {disallowedTools: ALL}      |
+ */
+type ProtectionLevel = 'full_access' | 'workspace_only' | 'readonly' | 'tools_disabled';
+
+const LEVEL_META: { level: ProtectionLevel; label: string; desc: string }[] = [
+  { level: 'full_access',    label: '不限制',     desc: '完全访问' },
+  { level: 'workspace_only', label: '仅工作区',   desc: '只能写入工作区目录' },
+  { level: 'readonly',       label: '只读',       desc: '禁止写入任何文件' },
+  { level: 'tools_disabled', label: '禁用工具',   desc: '禁止使用所有工具' },
+];
+
+function deriveLevel(
+  profile?: GroupInfo['permission_profile'],
+  sandbox?: GroupInfo['sandbox_config'],
+): ProtectionLevel {
+  const denied = new Set(profile?.disallowedTools ?? []);
+  const allDisabled = ALL_TOOLS.every((t) => denied.has(t));
+  if (allDisabled) return 'tools_disabled';
+  const writeDisabled = WRITE_TOOLS.every((t) => denied.has(t));
+  const sbxMode = sandbox?.mode ?? 'full_access';
+  if (writeDisabled || sbxMode === 'readonly') return 'readonly';
+  if (sbxMode === 'workspace_only') return 'workspace_only';
+  return 'full_access';
+}
+
+function levelToPayload(level: ProtectionLevel): {
+  permission_profile: { disallowedTools: string[] } | null;
+  sandbox_config: { mode: string } | null;
+} {
+  switch (level) {
+    case 'full_access':
+      return { permission_profile: null, sandbox_config: null };
+    case 'workspace_only':
+      return { permission_profile: null, sandbox_config: { mode: 'workspace_only' } };
+    case 'readonly':
+      return { permission_profile: { disallowedTools: [...WRITE_TOOLS] }, sandbox_config: { mode: 'readonly' } };
+    case 'tools_disabled':
+      return { permission_profile: { disallowedTools: [...ALL_TOOLS] }, sandbox_config: null };
+  }
 }
 
 export interface ChatGroupItemProps {
@@ -61,6 +105,7 @@ export interface ChatGroupItemProps {
   folder: string;
   lastMessage?: string;
   permissionProfile?: GroupInfo['permission_profile'];
+  sandboxConfig?: GroupInfo['sandbox_config'];
 
   isShared?: boolean;
   memberRole?: 'owner' | 'member';
@@ -84,6 +129,7 @@ export function ChatGroupItem({
   folder,
   lastMessage,
   permissionProfile,
+  sandboxConfig,
   isShared,
   memberRole,
   memberCount,
@@ -101,8 +147,8 @@ export function ChatGroupItem({
 }: ChatGroupItemProps) {
   const currentUser = useAuthStore((s) => s.user);
   const loadGroups = useChatStore((s) => s.loadGroups);
-  const [permSaving, setPermSaving] = useState(false);
-  const { toolsDisabled, readOnly } = deriveToggles(permissionProfile);
+  const [saving, setSaving] = useState(false);
+  const currentLevel = deriveLevel(permissionProfile, sandboxConfig);
   const defaultHomeName = '我的工作区';
   // Use actual name if it's been renamed, otherwise fall back to default
   const isDefaultName = !name || name === 'Main' || name === `${currentUser?.username} Home`;
@@ -112,26 +158,22 @@ export function ChatGroupItem({
       ? lastMessage.substring(0, 40) + '...'
       : lastMessage;
 
-  const updatePermission = async (newToolsDisabled: boolean, newReadOnly: boolean) => {
-    setPermSaving(true);
+  const updateLevel = async (level: ProtectionLevel) => {
+    if (level === currentLevel) return;
+    setSaving(true);
     try {
-      let profile: { disallowedTools: string[] } | null = null;
-      if (newToolsDisabled) {
-        profile = { disallowedTools: [...ALL_TOOLS] };
-      } else if (newReadOnly) {
-        profile = { disallowedTools: [...WRITE_TOOLS] };
-      }
-      await api.patch(`/api/groups/${encodeURIComponent(jid)}`, {
-        permission_profile: profile,
-      });
+      await api.patch(`/api/groups/${encodeURIComponent(jid)}`, levelToPayload(level));
       await loadGroups();
-      toast.success(newToolsDisabled ? '已禁用工具' : newReadOnly ? '已启用只读模式' : '已恢复全部权限');
+      const meta = LEVEL_META.find((m) => m.level === level)!;
+      toast.success(`访问控制已设为「${meta.label}」`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '更新失败');
     } finally {
-      setPermSaving(false);
+      setSaving(false);
     }
   };
+
+  const currentMeta = LEVEL_META.find((m) => m.level === currentLevel)!;
 
   return (
     <div
@@ -204,7 +246,7 @@ export function ChatGroupItem({
               <MoreHorizontal className="w-4 h-4" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-40">
+          <DropdownMenuContent align="end" className="w-44">
             {!isHome && onTogglePin && (
               <DropdownMenuItem onClick={() => onTogglePin(jid)}>
                 <Pin className="w-4 h-4" />
@@ -225,26 +267,34 @@ export function ChatGroupItem({
               重建工作区
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem
-              disabled={permSaving}
-              onClick={(e) => {
-                e.preventDefault();
-                updatePermission(!toolsDisabled, false);
-              }}
-            >
-              <ShieldOff className={cn('w-4 h-4', toolsDisabled && 'text-destructive')} />
-              {toolsDisabled ? '启用工具' : '禁用工具'}
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={permSaving || toolsDisabled}
-              onClick={(e) => {
-                e.preventDefault();
-                updatePermission(false, !readOnly);
-              }}
-            >
-              <BookLock className={cn('w-4 h-4', readOnly && 'text-amber-500')} />
-              {readOnly ? '允许修改' : '只读模式'}
-            </DropdownMenuItem>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger disabled={saving}>
+                <Shield className={cn('w-4 h-4', currentLevel !== 'full_access' && 'text-blue-500')} />
+                访问控制
+                <span className="ml-auto text-[10px] text-muted-foreground">
+                  {currentMeta.label}
+                </span>
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-44">
+                {LEVEL_META.map(({ level, label, desc }) => (
+                  <DropdownMenuItem
+                    key={level}
+                    onClick={(e) => { e.preventDefault(); updateLevel(level); }}
+                    className="flex-col items-start gap-0"
+                  >
+                    <div className="flex items-center w-full">
+                      <span className={cn('text-sm', currentLevel === level && 'font-semibold')}>
+                        {label}
+                      </span>
+                      {currentLevel === level && (
+                        <span className="ml-auto text-xs text-primary">✓</span>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-muted-foreground">{desc}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
             {!isHome && deletable && onDelete && (
               <DropdownMenuItem
                 variant="destructive"
