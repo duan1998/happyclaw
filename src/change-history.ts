@@ -11,6 +11,7 @@ import {
   getChangeRecords as dbGetChangeRecords,
   getChangeRecordById as dbGetChangeRecordById,
   getRegisteredGroup as dbGetRegisteredGroup,
+  getJidsByFolder as dbGetJidsByFolder,
   deleteChangeRecordsByFolder,
   type ChangeRecord,
 } from './db.js';
@@ -505,13 +506,33 @@ export function getRecord(id: string): ChangeRecord | undefined {
 
 /**
  * Resolve workDir for a change record's group_folder.
+ * Searches all registered groups that share this folder (multiple JIDs may map to one folder).
  */
 function resolveRecordWorkDir(groupFolder: string): string | null {
-  if (groupFolder.includes('..')) return null;
-  const group = dbGetRegisteredGroup(`web:${groupFolder}`);
-  const workDir = group?.customCwd
-    ? resolveWorkDir({ folder: groupFolder, customCwd: group.customCwd })
+  if (groupFolder.includes('..')) {
+    writeDebugLog(TAG, `resolveRecordWorkDir: path traversal rejected: ${groupFolder}`);
+    return null;
+  }
+
+  const jids = dbGetJidsByFolder(groupFolder);
+  let customCwd: string | undefined;
+  for (const jid of jids) {
+    const g = dbGetRegisteredGroup(jid);
+    if (g?.customCwd) {
+      customCwd = g.customCwd;
+      writeDebugLog(TAG, `resolveRecordWorkDir: found customCwd=${customCwd} via jid=${jid}`);
+      break;
+    }
+  }
+
+  const workDir = customCwd
+    ? resolveWorkDir({ folder: groupFolder, customCwd })
     : path.join(GROUPS_DIR, groupFolder);
+
+  writeDebugLog(
+    TAG,
+    `resolveRecordWorkDir: folder=${groupFolder} jids=${jids.length} workDir=${workDir} exists=${fs.existsSync(workDir)}`,
+  );
   return fs.existsSync(workDir) ? workDir : null;
 }
 
