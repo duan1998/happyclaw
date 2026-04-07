@@ -2349,6 +2349,12 @@ export function buildClaudeEnvLines(
     lines.push(
       `ANTHROPIC_AUTH_TOKEN=${sanitizeEnvValue(config.anthropicAuthToken)}`,
     );
+    // Claude Code CLI only reads ANTHROPIC_API_KEY, not ANTHROPIC_AUTH_TOKEN.
+    // When using a third-party relay (authToken set, no apiKey), also set
+    // ANTHROPIC_API_KEY so the CLI can authenticate.
+    if (!config.anthropicApiKey) {
+      lines.push(`ANTHROPIC_API_KEY=${sanitizeEnvValue(config.anthropicAuthToken)}`);
+    }
   }
   if (config.anthropicModel) {
     lines.push(`ANTHROPIC_MODEL=${sanitizeEnvValue(config.anthropicModel)}`);

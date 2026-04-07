@@ -75,7 +75,7 @@ export class TerminalManager {
           rows,
         });
 
-        const proc = spawn('node', [PTY_WORKER_PATH, workerArgs], {
+        const proc = spawn(process.execPath, [PTY_WORKER_PATH, workerArgs], {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: process.env as Record<string, string>,
         });

@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Download, Eye, EyeOff, Pencil, Save, Trash2, X } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Download, Eye, EyeOff, Loader2, Pencil, Plug, Save, Trash2, Unplug, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
@@ -15,6 +15,10 @@ interface McpServerDetailProps {
 export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
   const updateServer = useMcpServersStore((s) => s.updateServer);
   const deleteServer = useMcpServersStore((s) => s.deleteServer);
+  const authEntry = useMcpServersStore((s) => server ? s.authStatus[server.id] : undefined);
+  const startOAuth = useMcpServersStore((s) => s.startOAuth);
+  const disconnectOAuth = useMcpServersStore((s) => s.disconnectOAuth);
+  const checkAuthStatus = useMcpServersStore((s) => s.checkAuthStatus);
 
   const [deleting, setDeleting] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -28,6 +32,55 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
   const [editHeaders, setEditHeaders] = useState<Array<{ key: string; value: string }>>([]);
   const [editDescription, setEditDescription] = useState('');
   const [saving, setSaving] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+
+  const authStatus = authEntry?.status;
+  const authSupported = authEntry?.authSupported ?? false;
+  const isConnected = authStatus === 'connected';
+  const needsConnect = authSupported && (authStatus === 'disconnected' || authStatus === 'expired');
+
+  const handleOAuthMessage = useCallback(
+    (event: MessageEvent) => {
+      if (event.data?.type === 'mcp-oauth-complete' && event.data.success && server) {
+        setConnecting(false);
+        checkAuthStatus(server.id);
+      }
+    },
+    [server, checkAuthStatus],
+  );
+
+  useEffect(() => {
+    if (!authSupported) return;
+    window.addEventListener('message', handleOAuthMessage);
+    return () => window.removeEventListener('message', handleOAuthMessage);
+  }, [authSupported, handleOAuthMessage]);
+
+  const handleConnect = async () => {
+    if (!server) return;
+    setConnecting(true);
+    const url = await startOAuth(server.id);
+    if (url) {
+      const popup = window.open(url, 'mcp-oauth', 'width=600,height=700,popup=yes');
+      if (popup) {
+        const timer = setInterval(() => {
+          if (popup.closed) {
+            clearInterval(timer);
+            setConnecting(false);
+            checkAuthStatus(server.id);
+          }
+        }, 1000);
+      } else {
+        setConnecting(false);
+      }
+    } else {
+      setConnecting(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (!server) return;
+    await disconnectOAuth(server.id);
+  };
 
   if (!server) {
     return (
@@ -141,6 +194,20 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
               >
                 {server.enabled ? '已启用' : '已禁用'}
               </span>
+              {authSupported && isConnected && (
+                <span className="px-2 py-0.5 rounded text-xs font-medium bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 inline-flex items-center gap-1">
+                  <Plug size={10} />
+                  已授权
+                </span>
+              )}
+              {needsConnect && (
+                <span className="px-2 py-0.5 rounded text-xs font-medium bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300">
+                  未授权
+                </span>
+              )}
+              {authStatus === 'checking' && (
+                <Loader2 size={14} className="animate-spin text-muted-foreground" />
+              )}
             </div>
             {server.description && (
               <p className="text-sm text-muted-foreground">{server.description}</p>
@@ -148,6 +215,30 @@ export function McpServerDetail({ server, onDeleted }: McpServerDetailProps) {
           </div>
 
           <div className="flex items-center gap-2">
+            {/* OAuth connect/disconnect */}
+            {needsConnect && (
+              <Button
+                size="sm"
+                variant="default"
+                onClick={handleConnect}
+                disabled={connecting}
+                className="gap-1.5"
+              >
+                {connecting ? <Loader2 size={14} className="animate-spin" /> : <Unplug size={14} />}
+                {connecting ? '授权中...' : 'Connect'}
+              </Button>
+            )}
+            {authSupported && isConnected && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleDisconnect}
+                className="gap-1.5 text-muted-foreground"
+              >
+                <Unplug size={14} />
+                断开
+              </Button>
+            )}
             {!editing && (
               <button
                 onClick={startEdit}

@@ -1,0 +1,16 @@
+功能: MCP SSE 服务器 OAuth2 授权 + 多项 bug 修复
+
+### MCP OAuth2 授权
+- 后端实现完整 OAuth2 PKCE 流程: 元数据发现、动态客户端注册、授权码交换、token 存储与自动刷新
+- 新增 4 个端点: auth-status / oauth/start / oauth/callback / oauth revoke
+- agent-runner 启动时自动注入 OAuth token 到 SSE 服务器 Authorization header
+- 前端 McpServerCard/Detail 显示 Connect 按钮(未授权)或已授权标签(绿色)
+- OAuth 弹窗完成后通过 postMessage + 轮询双保险检测状态变化
+- 元数据发现结果缓存 5 分钟, 减少重复网络请求
+
+### Bug 修复
+- agent 查询完成后广播 idle 状态, 防止前端卡在 running
+- IPC 等待模式下的 agent 可通过 _close sentinel 中断
+- git shadow repo 操作失败后清理 index.lock, 防止后续操作全部卡死
+- ANTHROPIC_AUTH_TOKEN 自动映射为 ANTHROPIC_API_KEY (第三方中转)
+- 添加 uncaughtException/unhandledRejection 处理器, 崩溃前写入 debug.log

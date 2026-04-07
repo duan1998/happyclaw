@@ -289,6 +289,20 @@ async function _takeSnapshot(
       `takeSnapshot FAIL: folder=${folder} label=${label} ${ms}ms err=${err.message}\n  stack=${err.stack?.split('\n').slice(0, 3).join(' | ')}`,
     );
     logger.error({ err, folder, label }, 'takeSnapshot failed');
+
+    // Clean up stale index.lock left by timed-out or crashed git processes.
+    // Without this, all subsequent git operations on this shadow repo would
+    // fail with "Unable to create '...index.lock': File exists".
+    const lockFile = path.join(gitDir, 'index.lock');
+    try {
+      if (fs.existsSync(lockFile)) {
+        fs.unlinkSync(lockFile);
+        writeDebugLog(TAG, `takeSnapshot: removed stale index.lock for ${folder}`);
+      }
+    } catch {
+      // best-effort
+    }
+
     return null;
   }
 }

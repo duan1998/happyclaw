@@ -1810,6 +1810,9 @@ async function runQuery(
         })] }]
       },
       agents: loadAllAgents(),
+      stderr: (data: string) => {
+        log(`[CLI-STDERR] ${data.trimEnd()}`);
+      },
     }
   });
     queryRef = q;

@@ -127,7 +127,7 @@ export function scanSkillDirectory(
   try {
     const entries = fs.readdirSync(rootDir, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 
       const skillDir = path.join(rootDir, entry.name);
       const skillMdPath = path.join(skillDir, 'SKILL.md');

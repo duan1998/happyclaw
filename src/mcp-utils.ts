@@ -64,11 +64,33 @@ function loadMcpServersFromFile(
 /**
  * Load enabled MCP server configs for a user.
  * Reads data/mcp-servers/{userId}/servers.json.
- * All workspaces owned by this user share the same MCP server set.
+ * For SSE/HTTP servers with stored OAuth tokens, injects the Authorization header.
  */
 export function loadUserMcpServers(
   userId: string,
 ): Record<string, Record<string, unknown>> {
   const serversFile = path.join(DATA_DIR, 'mcp-servers', userId, 'servers.json');
-  return loadMcpServersFromFile(serversFile);
+  const servers = loadMcpServersFromFile(serversFile);
+
+  // Inject OAuth tokens for SSE/HTTP servers
+  const oauthDir = path.join(DATA_DIR, 'mcp-servers', userId, 'oauth');
+  for (const [name, server] of Object.entries(servers)) {
+    if (server.type !== 'http' && server.type !== 'sse') continue;
+    try {
+      const tokenFile = path.join(oauthDir, `${name}.token.json`);
+      if (!fs.existsSync(tokenFile)) continue;
+      const token = JSON.parse(fs.readFileSync(tokenFile, 'utf8'));
+      if (token.access_token) {
+        const existing = (server.headers || {}) as Record<string, string>;
+        server.headers = {
+          ...existing,
+          Authorization: `${token.token_type || 'Bearer'} ${token.access_token}`,
+        };
+      }
+    } catch {
+      // Token file missing or corrupt — skip
+    }
+  }
+
+  return servers;
 }

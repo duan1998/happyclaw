@@ -18,6 +18,8 @@ export interface McpServer {
   addedAt: string;
 }
 
+export type McpAuthStatus = 'connected' | 'disconnected' | 'expired' | 'not_applicable' | 'checking';
+
 interface SyncHostResult {
   added: number;
   updated: number;
@@ -30,6 +32,7 @@ interface McpServersState {
   loading: boolean;
   error: string | null;
   syncing: boolean;
+  authStatus: Record<string, { status: McpAuthStatus; authSupported: boolean }>;
 
   loadServers: () => Promise<void>;
   addServer: (server: {
@@ -46,6 +49,9 @@ interface McpServersState {
   toggleServer: (id: string, enabled: boolean) => Promise<void>;
   deleteServer: (id: string) => Promise<void>;
   syncHostServers: () => Promise<SyncHostResult>;
+  checkAuthStatus: (serverId: string) => Promise<void>;
+  startOAuth: (serverId: string) => Promise<string | null>;
+  disconnectOAuth: (serverId: string) => Promise<void>;
 }
 
 export const useMcpServersStore = create<McpServersState>((set, get) => ({
@@ -53,12 +59,19 @@ export const useMcpServersStore = create<McpServersState>((set, get) => ({
   loading: false,
   error: null,
   syncing: false,
+  authStatus: {},
 
   loadServers: async () => {
     set({ loading: true });
     try {
       const data = await api.get<{ servers: McpServer[] }>('/api/mcp-servers');
       set({ servers: data.servers, loading: false, error: null });
+      // Check auth status for SSE/HTTP servers
+      for (const server of data.servers) {
+        if (server.type === 'sse' || server.type === 'http') {
+          get().checkAuthStatus(server.id);
+        }
+      }
     } catch (err) {
       set({ loading: false, error: err instanceof Error ? err.message : String(err) });
     }
@@ -118,6 +131,57 @@ export const useMcpServersStore = create<McpServersState>((set, get) => ({
       throw err;
     } finally {
       set({ syncing: false });
+    }
+  },
+
+  checkAuthStatus: async (serverId: string) => {
+    set((s) => ({
+      authStatus: { ...s.authStatus, [serverId]: { status: 'checking', authSupported: false } },
+    }));
+    try {
+      const data = await api.get<{ authSupported: boolean; status: string }>(
+        `/api/mcp-servers/${encodeURIComponent(serverId)}/auth-status`,
+      );
+      set((s) => ({
+        authStatus: {
+          ...s.authStatus,
+          [serverId]: {
+            status: data.status as McpAuthStatus,
+            authSupported: data.authSupported,
+          },
+        },
+      }));
+    } catch {
+      set((s) => ({
+        authStatus: { ...s.authStatus, [serverId]: { status: 'not_applicable', authSupported: false } },
+      }));
+    }
+  },
+
+  startOAuth: async (serverId: string) => {
+    try {
+      const data = await api.post<{ authUrl: string }>(
+        `/api/mcp-servers/${encodeURIComponent(serverId)}/oauth/start`,
+        {},
+      );
+      return data.authUrl;
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
+      return null;
+    }
+  },
+
+  disconnectOAuth: async (serverId: string) => {
+    try {
+      await api.delete(`/api/mcp-servers/${encodeURIComponent(serverId)}/oauth`);
+      set((s) => ({
+        authStatus: {
+          ...s.authStatus,
+          [serverId]: { status: 'disconnected', authSupported: true },
+        },
+      }));
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) });
     }
   },
 }));

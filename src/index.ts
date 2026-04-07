@@ -5800,6 +5800,9 @@ async function processAgentConversation(
         output.streamEvent.statusText === 'interrupted')
     ) {
       queue.markRunnerQueryIdle(virtualJid);
+      // Broadcast idle so the frontend stops showing "running" spinner.
+      // The process stays alive in IPC-wait mode for follow-up messages.
+      broadcastAgentStatus(chatJid, agentId, 'idle', agent.name, agent.prompt);
     }
 
     // Stream events
@@ -8197,9 +8200,13 @@ async function main(): Promise<void> {
   function startSkillAutoSync(): void {
     stopSkillAutoSync();
     const settings = getSystemSettings();
-    if (!settings.skillAutoSyncEnabled) return;
+    if (!settings.skillAutoSyncEnabled) {
+      writeDebugLog('SKILL_AUTO_SYNC', 'disabled, skipping');
+      return;
+    }
 
     const intervalMs = settings.skillAutoSyncIntervalMinutes * 60 * 1000;
+    writeDebugLog('SKILL_AUTO_SYNC', `starting timer, interval=${settings.skillAutoSyncIntervalMinutes}min`);
     logger.info(
       { intervalMinutes: settings.skillAutoSyncIntervalMinutes },
       'Starting skill auto-sync timer',
@@ -8212,13 +8219,16 @@ async function main(): Promise<void> {
         return;
       }
 
+      writeDebugLog('SKILL_AUTO_SYNC', 'runSync START');
       try {
         const { users: adminUsers } = listUsers({
           role: 'admin',
           status: 'active',
         });
+        writeDebugLog('SKILL_AUTO_SYNC', `found ${adminUsers.length} admin users`);
         for (const admin of adminUsers) {
           try {
+            writeDebugLog('SKILL_AUTO_SYNC', `syncing for user=${admin.username} id=${admin.id}`);
             const result = await syncHostSkillsForUser(admin.id);
             const { added, updated, deleted } = result.stats;
             if (added > 0 || updated > 0 || deleted > 0) {
@@ -8232,7 +8242,9 @@ async function main(): Promise<void> {
                 'Skill auto-sync completed with changes',
               );
             }
+            writeDebugLog('SKILL_AUTO_SYNC', `done for user=${admin.username} added=${added} updated=${updated} deleted=${deleted}`);
           } catch (err) {
+            writeDebugLog('SKILL_AUTO_SYNC', `FAILED for user=${admin.username}: ${err instanceof Error ? err.stack || err.message : err}`);
             logger.warn(
               { err, userId: admin.id },
               'Skill auto-sync failed for user',
@@ -8240,8 +8252,10 @@ async function main(): Promise<void> {
           }
         }
       } catch (err) {
+        writeDebugLog('SKILL_AUTO_SYNC', `OUTER ERROR: ${err instanceof Error ? err.stack || err.message : err}`);
         logger.error({ err }, 'Skill auto-sync failed');
       }
+      writeDebugLog('SKILL_AUTO_SYNC', 'runSync END');
     };
 
     // Run once immediately, then on interval
@@ -8710,7 +8724,22 @@ async function checkImBindingsHealth(): Promise<void> {
   }
 }
 
+// Crash handlers — capture fatal errors to debug.log before the process dies.
+// Without these, uncaught exceptions silently kill the backend and leave no trace.
+process.on('uncaughtException', (err) => {
+  writeDebugLog('FATAL', `uncaughtException: ${err.message}\n  stack=${err.stack}`);
+  logger.fatal({ err }, 'uncaughtException');
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? `${reason.message}\n  stack=${reason.stack}` : String(reason);
+  writeDebugLog('FATAL', `unhandledRejection: ${msg}`);
+  logger.fatal({ reason }, 'unhandledRejection');
+  process.exit(1);
+});
+
 main().catch((err) => {
+  writeDebugLog('FATAL', `main() failed: ${err.message}\n  stack=${err.stack}`);
   logger.error({ err }, 'Failed to start happyclaw');
   process.exit(1);
 });

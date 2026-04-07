@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execFile } from 'child_process';
+import { writeDebugLog } from '../debug-log.js';
 import { promisify } from 'util';
 import type { Variables } from '../web-context.js';
 import type { AuthUser } from '../types.js';
@@ -363,7 +364,6 @@ function findModifiedEntries(dir: string, afterMs: number): string[] {
  * Resolves symlinks and copies the real content so the copy is self-contained.
  */
 function copySkillToUser(src: string, dest: string): void {
-  // Resolve symlink to get the real directory
   let realSrc = src;
   try {
     const lstat = fs.lstatSync(src);
@@ -374,7 +374,12 @@ function copySkillToUser(src: string, dest: string): void {
     // use src as-is
   }
 
-  fs.cpSync(realSrc, dest, { recursive: true });
+  try {
+    fs.cpSync(realSrc, dest, { recursive: true, dereference: true });
+  } catch (err) {
+    writeDebugLog('SKILL_SYNC', `copySkillToUser FAILED: src=${realSrc} dest=${dest} err=${err instanceof Error ? err.message : err}`);
+    throw err;
+  }
 }
 
 // --- Search cache (LRU, 5min TTL, max 100 entries) ---
@@ -857,10 +862,15 @@ async function syncHostSkillsForUser(
     const userDir = getUserSkillsDir(userId);
     fs.mkdirSync(userDir, { recursive: true });
 
+    writeDebugLog('SKILL_SYNC', `START userId=${userId} hostDirs=${hostDirs.join(', ')} userDir=${userDir}`);
+
     // 1. 扫描所有宿主机 skills 目录（后扫描的覆盖前面的同名 skill）
     const hostSkillMap = new Map<string, string>();
     for (const hostDir of hostDirs) {
-      if (!fs.existsSync(hostDir)) continue;
+      if (!fs.existsSync(hostDir)) {
+        writeDebugLog('SKILL_SYNC', `hostDir not found: ${hostDir}`);
+        continue;
+      }
       for (const entry of fs.readdirSync(hostDir, { withFileTypes: true })) {
         if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
         const skillDir = path.join(hostDir, entry.name);
@@ -872,16 +882,18 @@ async function syncHostSkillsForUser(
           ) {
             hostSkillMap.set(entry.name, hostDir);
           }
-        } catch {
-          // 跳过 broken symlinks
+        } catch (err) {
+          writeDebugLog('SKILL_SYNC', `broken symlink skipped: ${skillDir} err=${err instanceof Error ? err.message : err}`);
         }
       }
     }
     const hostSkillNames = [...hostSkillMap.keys()];
+    writeDebugLog('SKILL_SYNC', `discovered ${hostSkillNames.length} host skills: ${hostSkillNames.join(', ')}`);
 
     // 2. 读取 manifest
     const manifest = readHostSyncManifest(userId);
     const previouslySynced = new Set(manifest.syncedSkills);
+    writeDebugLog('SKILL_SYNC', `previouslySynced=${[...previouslySynced].join(', ')}`);
 
     // 3. 检测用户目录中手动安装的 skills
     const existingUserSkills = new Set<string>();
@@ -890,6 +902,7 @@ async function syncHostSkillsForUser(
         if (entry.isDirectory()) existingUserSkills.add(entry.name);
       }
     }
+    writeDebugLog('SKILL_SYNC', `existingUserSkills=${[...existingUserSkills].join(', ')}`);
 
     const stats = { added: 0, updated: 0, deleted: 0, skipped: 0 };
     const newSyncedList: string[] = [];
@@ -899,6 +912,7 @@ async function syncHostSkillsForUser(
       const isManuallyInstalled =
         existingUserSkills.has(name) && !previouslySynced.has(name);
       if (isManuallyInstalled) {
+        writeDebugLog('SKILL_SYNC', `SKIP (manual): ${name}`);
         stats.skipped++;
         continue;
       }
@@ -907,15 +921,21 @@ async function syncHostSkillsForUser(
       const src = path.join(srcDir, name);
       const dest = path.join(userDir, name);
 
-      if (existingUserSkills.has(name)) {
-        fs.rmSync(dest, { recursive: true, force: true });
-        copySkillToUser(src, dest);
-        stats.updated++;
-      } else {
-        copySkillToUser(src, dest);
-        stats.added++;
+      try {
+        if (existingUserSkills.has(name)) {
+          writeDebugLog('SKILL_SYNC', `UPDATE: ${name} src=${src} dest=${dest}`);
+          fs.rmSync(dest, { recursive: true, force: true });
+          copySkillToUser(src, dest);
+          stats.updated++;
+        } else {
+          writeDebugLog('SKILL_SYNC', `ADD: ${name} src=${src} dest=${dest}`);
+          copySkillToUser(src, dest);
+          stats.added++;
+        }
+        newSyncedList.push(name);
+      } catch (err) {
+        writeDebugLog('SKILL_SYNC', `FAILED to sync skill "${name}": ${err instanceof Error ? err.stack || err.message : err}`);
       }
-      newSyncedList.push(name);
     }
 
     // 5. 删除宿主机已移除的（仅清理之前同步来的）
@@ -923,8 +943,13 @@ async function syncHostSkillsForUser(
     for (const name of previouslySynced) {
       if (!hostSkillSet.has(name) && existingUserSkills.has(name)) {
         const dest = path.join(userDir, name);
-        fs.rmSync(dest, { recursive: true, force: true });
-        stats.deleted++;
+        writeDebugLog('SKILL_SYNC', `DELETE (removed from host): ${name} dest=${dest}`);
+        try {
+          fs.rmSync(dest, { recursive: true, force: true });
+          stats.deleted++;
+        } catch (err) {
+          writeDebugLog('SKILL_SYNC', `DELETE FAILED: ${name} err=${err instanceof Error ? err.message : err}`);
+        }
       }
     }
 
@@ -934,6 +959,7 @@ async function syncHostSkillsForUser(
       lastSyncAt: new Date().toISOString(),
     });
 
+    writeDebugLog('SKILL_SYNC', `DONE userId=${userId} added=${stats.added} updated=${stats.updated} deleted=${stats.deleted} skipped=${stats.skipped} total=${hostSkillNames.length}`);
     return { stats, total: hostSkillNames.length };
   });
 }
@@ -945,8 +971,14 @@ skillsRoutes.post('/sync-host', authMiddleware, async (c) => {
     return c.json({ error: 'Only admin can sync host skills' }, 403);
   }
 
-  const result = await syncHostSkillsForUser(authUser.id);
-  return c.json(result);
+  writeDebugLog('SKILL_SYNC', `API /sync-host called by user=${authUser.username} id=${authUser.id}`);
+  try {
+    const result = await syncHostSkillsForUser(authUser.id);
+    return c.json(result);
+  } catch (err) {
+    writeDebugLog('SKILL_SYNC', `API /sync-host CRASHED: ${err instanceof Error ? err.stack || err.message : err}`);
+    throw err;
+  }
 });
 
 skillsRoutes.post('/install', authMiddleware, async (c) => {

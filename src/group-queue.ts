@@ -687,7 +687,19 @@ export class GroupQueue {
     const state = this.resolveActiveState(groupJid);
     if (!state) return false;
     if (!state.queryInFlight) {
-      logger.info({ groupJid }, 'Interrupt ignored: runner active but no query in flight');
+      // No active query — the agent is in IPC-wait mode.
+      // Send _close sentinel so the process exits gracefully.
+      if (state.active) {
+        const inputDir = this.resolveIpcInputDir(state);
+        try {
+          fs.mkdirSync(inputDir, { recursive: true });
+          fs.writeFileSync(path.join(inputDir, '_close'), '');
+          logger.info({ groupJid, inputDir }, 'Close sentinel written (no query in flight)');
+          return true;
+        } catch (err) {
+          logger.warn({ groupJid, inputDir, err }, 'Failed to write close sentinel');
+        }
+      }
       return false;
     }
 
