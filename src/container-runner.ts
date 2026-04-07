@@ -978,6 +978,7 @@ export async function runHostAgent(
   try {
     const skillsDir = path.join(groupSessionsDir, 'skills');
     fs.mkdirSync(skillsDir, { recursive: true });
+    writeDebugLog('SKILL_LINK', `folder=${group.folder} skillsDir=${skillsDir} groupDir=${groupDir}`);
     // 清空已有符号链接
     for (const entry of fs.readdirSync(skillsDir, { withFileTypes: true })) {
       const entryPath = path.join(skillsDir, entry.name);
@@ -985,24 +986,33 @@ export async function runHostAgent(
         if (entry.isSymbolicLink() || entry.isDirectory()) {
           fs.rmSync(entryPath, { recursive: true, force: true });
         }
-      } catch {
-        /* ignore */
+      } catch (rmErr) {
+        writeDebugLog('SKILL_LINK', `cleanup rm failed: ${entryPath} err=${rmErr instanceof Error ? rmErr.message : rmErr}`);
       }
     }
 
+    let linkedCount = 0;
+    let linkFailCount = 0;
     const linkSkillEntries = (sourceDir: string) => {
-      if (!fs.existsSync(sourceDir)) return;
-      for (const entry of fs.readdirSync(sourceDir, { withFileTypes: true })) {
+      if (!fs.existsSync(sourceDir)) {
+        writeDebugLog('SKILL_LINK', `sourceDir not found: ${sourceDir}`);
+        return;
+      }
+      const entries = fs.readdirSync(sourceDir, { withFileTypes: true });
+      writeDebugLog('SKILL_LINK', `scanning ${sourceDir}: ${entries.length} entries`);
+      for (const entry of entries) {
         if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
         const linkPath = path.join(skillsDir, entry.name);
         try {
-          // 移除已有符号链接（高优先级覆盖低优先级）
           if (fs.existsSync(linkPath)) {
             fs.rmSync(linkPath, { recursive: true, force: true });
           }
-          fs.symlinkSync(path.join(sourceDir, entry.name), linkPath);
-        } catch {
-          /* ignore */
+          const target = path.join(sourceDir, entry.name);
+          fs.symlinkSync(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+          linkedCount++;
+        } catch (linkErr) {
+          linkFailCount++;
+          writeDebugLog('SKILL_LINK', `symlink FAILED: ${entry.name} src=${sourceDir} err=${linkErr instanceof Error ? linkErr.message : linkErr}`);
         }
       }
     };
@@ -1025,7 +1035,9 @@ export async function runHostAgent(
     if (ownerId) {
       linkSkillEntries(path.join(DATA_DIR, 'skills', ownerId));
     }
+    writeDebugLog('SKILL_LINK', `DONE folder=${group.folder} linked=${linkedCount} failed=${linkFailCount}`);
   } catch (err) {
+    writeDebugLog('SKILL_LINK', `OUTER ERROR folder=${group.folder}: ${err instanceof Error ? err.stack || err.message : err}`);
     logger.warn(
       { folder: group.folder, err },
       '宿主机模式 skills 符号链接失败',
@@ -1037,6 +1049,21 @@ export async function runHostAgent(
     ...(process.env as Record<string, string>),
   };
   const originalPath = hostEnv['PATH'] || hostEnv['Path'] || '';
+
+  // Ensure the Node.js executable directory is in PATH so that child processes
+  // (e.g. Claude Agent SDK spawning `node cli.js`) can find `node`.
+  // In the desktop app, the bundled node.exe is invoked by full path and may not
+  // be on the system PATH if the user hasn't installed Node.js globally.
+  const nodeDir = path.dirname(process.execPath);
+  const nodeAlreadyInPath = originalPath.split(path.delimiter).some((p) => {
+    try { return path.resolve(p) === path.resolve(nodeDir); } catch { return false; }
+  });
+  writeDebugLog('RUNNER', `Host node PATH check: execPath=${process.execPath} nodeDir=${nodeDir} alreadyInPath=${nodeAlreadyInPath}`);
+  if (!nodeAlreadyInPath) {
+    const pathKey = Object.keys(hostEnv).find((k) => k.toUpperCase() === 'PATH') || 'PATH';
+    hostEnv[pathKey] = nodeDir + path.delimiter + (hostEnv[pathKey] || '');
+    writeDebugLog('RUNNER', `Injected nodeDir into ${pathKey}, new PATH(first 300)=${(hostEnv[pathKey] || '').slice(0, 300)}`);
+  }
 
   // ─── Provider Pool selection (host mode) ───
   const containerOverride = getContainerEnvConfig(group.folder);
@@ -1124,6 +1151,8 @@ export async function runHostAgent(
     const agentRunnerRoot = path.join(projectRoot, 'container', 'agent-runner');
     const agentRunnerNodeModules = path.join(agentRunnerRoot, 'node_modules');
     const agentRunnerDist = path.join(agentRunnerRoot, 'dist', 'index.js');
+    writeDebugLog('RUNNER', `Host preflight: cwd=${projectRoot} agentRunnerRoot=${agentRunnerRoot}`);
+    writeDebugLog('RUNNER', `Host preflight: dist=${agentRunnerDist} exists=${fs.existsSync(agentRunnerDist)}`);
     const requiredDeps = ['@anthropic-ai/claude-agent-sdk'];
     const missingDeps = requiredDeps.filter((dep) => {
       const depJson = path.join(
@@ -1135,6 +1164,7 @@ export async function runHostAgent(
     });
     if (missingDeps.length > 0) {
       const missing = missingDeps.join(', ');
+      writeDebugLog('RUNNER', `Host preflight FAIL: missing deps=${missing}`);
       logger.error(
         { group: group.name, missingDeps },
         'Host agent preflight failed: dependencies missing',
@@ -1144,12 +1174,24 @@ export async function runHostAgent(
       );
     }
     if (!fs.existsSync(agentRunnerDist)) {
+      writeDebugLog('RUNNER', `Host preflight FAIL: dist not found at ${agentRunnerDist}`);
       logger.error(
         { group: group.name, agentRunnerDist },
         'Host agent preflight failed: dist not found',
       );
       return hostModeSetupError(
         `agent-runner 未编译。请先执行：${setupBuildHint}`,
+      );
+    }
+
+    // Verify SDK cli.js exists — this is the executable the SDK spawns internally
+    const sdkCliJs = path.join(agentRunnerNodeModules, '@anthropic-ai', 'claude-agent-sdk', 'cli.js');
+    const sdkCliExists = fs.existsSync(sdkCliJs);
+    writeDebugLog('RUNNER', `Host preflight: SDK cli.js=${sdkCliJs} exists=${sdkCliExists}${sdkCliExists ? ` size=${fs.statSync(sdkCliJs).size}` : ''}`);
+    if (!sdkCliExists) {
+      writeDebugLog('RUNNER', `Host preflight FAIL: SDK cli.js missing — SDK dir contents: ${(() => { try { return fs.readdirSync(path.dirname(sdkCliJs)).join(', '); } catch (e: any) { return `readdir error: ${e.message}`; } })()}`);
+      return hostModeSetupError(
+        `Claude Agent SDK 的 cli.js 缺失（${sdkCliJs}）。请重新安装：${setupInstallHint}`,
       );
     }
 
@@ -1194,6 +1236,9 @@ export async function runHostAgent(
       'Spawning host agent',
     );
 
+    const finalPathValue = hostEnv['PATH'] || hostEnv['Path'] || '';
+    writeDebugLog('RUNNER', `Host spawn: execPath=${process.execPath} dist=${agentRunnerDist} cwd=${groupDir} PATH(first 500)=${finalPathValue.slice(0, 500)}`);
+
     const logsDir = path.join(groupDir, 'logs');
 
     const hostResult = await new Promise<ContainerOutput>((resolve) => {
@@ -1204,8 +1249,8 @@ export async function runHostAgent(
         resolve(output);
       };
 
-      // 7. 启动进程
-      const proc = spawn('node', [agentRunnerDist], {
+      // 7. 启动进程（使用 process.execPath 而非 bare 'node'，桌面端内置 Node 不在 PATH 中）
+      const proc = spawn(process.execPath, [agentRunnerDist], {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: hostEnv,
         cwd: groupDir,
@@ -1318,7 +1363,7 @@ export async function runHostAgent(
           `err.errno=${err.errno}`,
           `err.syscall=${err.syscall}`,
           `err.path=${(err as any).path}`,
-          `spawn args=['node', '${agentRunnerDist}']`,
+          `spawn args=['${process.execPath}', '${agentRunnerDist}']`,
           `spawn cwd=${groupDir}`,
         ].join('\n  '));
         logger.error(
@@ -1444,37 +1489,51 @@ function buildCodexAgentContextBlock(): string {
 
 function resolveCodexOnWindows(cmd: string): ResolvedCodex {
   const fallback: ResolvedCodex = { command: cmd, args: [] };
-  if (process.platform !== 'win32' || path.isAbsolute(cmd)) return fallback;
+  if (path.isAbsolute(cmd)) return fallback;
 
-  try {
-    const whereOutput = execFileSync('where.exe', [cmd], {
-      encoding: 'utf8',
-      timeout: 5000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const candidates = whereOutput.trim().split(/\r?\n/).filter(Boolean);
-    const npmCmd = candidates.find((p) => {
-      const lower = p.toLowerCase().trim();
-      return !lower.includes('\\windowsapps\\') && lower.endsWith('.cmd');
-    });
-
-    if (npmCmd) {
-      const cmdContent = fs.readFileSync(npmCmd.trim(), 'utf-8');
-      // npm .cmd files contain: "%_prog%"  "%dp0%\node_modules\...\bin\file.js" %*
-      const jsMatch = cmdContent.match(/%dp0%\\([^"]+\.js)/);
-      if (jsMatch) {
-        const cmdDir = path.dirname(npmCmd.trim());
-        const jsEntry = path.join(cmdDir, jsMatch[1]);
-        if (fs.existsSync(jsEntry)) {
-          return { command: process.execPath, args: [jsEntry] };
-        }
-      }
-      return { command: npmCmd.trim(), args: [] };
-    }
-  } catch {
-    // where.exe failed — command not in PATH at all
+  // 1. Bundled codex in project node_modules (works on all platforms)
+  const bundledJs = path.join(process.cwd(), 'node_modules', '@openai', 'codex', 'bin', 'codex.js');
+  if (fs.existsSync(bundledJs)) {
+    writeDebugLog('RUNNER', `[resolveCodex] using bundled codex: ${bundledJs}`);
+    return { command: process.execPath, args: [bundledJs] };
   }
 
+  // 2. Windows-specific: resolve via where.exe → .cmd → .js entry
+  if (process.platform === 'win32') {
+    try {
+      const whereOutput = execFileSync('where.exe', [cmd], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      const candidates = whereOutput.trim().split(/\r?\n/).filter(Boolean);
+      const npmCmd = candidates.find((p) => {
+        const lower = p.toLowerCase().trim();
+        return !lower.includes('\\windowsapps\\') && lower.endsWith('.cmd');
+      });
+
+      if (npmCmd) {
+        const cmdContent = fs.readFileSync(npmCmd.trim(), 'utf-8');
+        // npm .cmd files contain: "%_prog%"  "%dp0%\node_modules\...\bin\file.js" %*
+        const jsMatch = cmdContent.match(/%dp0%\\([^"]+\.js)/);
+        if (jsMatch) {
+          const cmdDir = path.dirname(npmCmd.trim());
+          const jsEntry = path.join(cmdDir, jsMatch[1]);
+          if (fs.existsSync(jsEntry)) {
+            writeDebugLog('RUNNER', `[resolveCodex] resolved JS entry: ${jsEntry} (via ${npmCmd.trim()})`);
+            return { command: process.execPath, args: [jsEntry] };
+          }
+          writeDebugLog('RUNNER', `[resolveCodex] JS entry not found: ${jsEntry}, falling back to .cmd`);
+        }
+        writeDebugLog('RUNNER', `[resolveCodex] using .cmd wrapper: ${npmCmd.trim()}`);
+        return { command: npmCmd.trim(), args: [] };
+      }
+    } catch {
+      writeDebugLog('RUNNER', `[resolveCodex] where.exe failed for '${cmd}' — not in PATH`);
+    }
+  }
+
+  writeDebugLog('RUNNER', `[resolveCodex] no bundled or system codex found, falling back to bare command '${cmd}'`);
   return fallback;
 }
 
@@ -1494,7 +1553,10 @@ export async function runCodexHostAgent(
   const config = getCodexProviderConfig();
   const startTime = Date.now();
 
+  writeDebugLog('RUNNER', `[codex] config: group=${group.name} folder=${group.folder} authMode=${config.authMode} hasApiKey=${!!config.apiKey} codexCommand=${config.codexCommand || '(default:codex)'}`);
+
   if (!isCodexAuthAvailable(config)) {
+    writeDebugLog('RUNNER', `[codex] AUTH UNAVAILABLE: group=${group.name} authMode=${config.authMode}`);
     return {
       status: 'error',
       result: config.authMode === 'chatgpt'
@@ -1585,6 +1647,9 @@ export async function runCodexHostAgent(
   }
 
   args.push(effectivePrompt);
+
+  const cmdExists = fs.existsSync(resolved.command);
+  writeDebugLog('RUNNER', `[codex] spawn: cmd=${resolved.command} exists=${cmdExists} cwd=${groupDir} args=[${args.slice(0, -1).join(', ')}] promptLen=${effectivePrompt.length}`);
 
   logger.info(
     { group: group.name, workingDir: groupDir, codexCmd: resolved.command, argCount: args.length,
@@ -1704,6 +1769,7 @@ export async function runCodexHostAgent(
       stderrContent += text;
       if (firstStderr) {
         firstStderr = false;
+        writeDebugLog('RUNNER', `[codex] first stderr group=${group.name}: ${text.slice(0, 500)}`);
         logger.info({ group: group.name, pid: proc.pid, stderr: text.slice(0, 300) }, 'Codex first stderr data');
       }
     });
@@ -1712,9 +1778,11 @@ export async function runCodexHostAgent(
       clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
       const duration = Date.now() - startTime;
+      writeDebugLog('RUNNER', `[codex] close group=${group.name} code=${code} duration=${duration}ms stderrLen=${stderrContent.length} resultLen=${finalText.length}`);
       logger.info({ group: group.name, pid: proc.pid, code, duration, stderrLen: stderrContent.length, resultLen: finalText.length }, 'Codex process closed');
 
       if (timedOut) {
+        writeDebugLog('RUNNER', `[codex] TIMEOUT group=${group.name} duration=${Math.round(duration / 1000)}s`);
         resolveOnce({
           status: 'error',
           result: `Codex agent timed out after ${Math.round(duration / 1000)}s`,
@@ -1729,6 +1797,7 @@ export async function runCodexHostAgent(
 
         // If resume failed (stale session), retry without session ID
         if (input.sessionId && /thread\/resume|no rollout found/i.test(stderrTail)) {
+          writeDebugLog('RUNNER', `[codex] session resume failed, retrying fresh: group=${group.name}`);
           logger.warn(
             { group: group.name, sessionId: input.sessionId },
             'Codex session resume failed, retrying with fresh session',
@@ -1743,6 +1812,7 @@ export async function runCodexHostAgent(
           return;
         }
 
+        writeDebugLog('RUNNER', `[codex] EXIT ERROR group=${group.name} code=${code} stderr=${stderrTail.slice(0, 300)}`);
         logger.error(
           { group: group.name, code, stderr: stderrTail, stdout: stdoutBuffer.slice(0, 500) },
           'Codex agent exited with error',
@@ -1764,8 +1834,8 @@ export async function runCodexHostAgent(
         }
       }
 
-      // Emit the final result via onOutput so processGroupMessages sets
-      // sentReply = true and doesn't fall into buildInterruptedReply.
+      writeDebugLog('RUNNER', `[codex] OK group=${group.name} duration=${duration}ms resultLen=${finalText.length} sessionId=${lastSessionId ?? '(none)'}`);
+
       if (onOutput && finalText) {
         void onOutput({
           status: 'success',
@@ -1786,17 +1856,19 @@ export async function runCodexHostAgent(
 
     proc.on('error', (err) => {
       clearTimeout(timeout);
+      const hint = process.platform === 'win32'
+        ? ` On Windows, run: npm install -g @openai/codex`
+        : '';
+      const errorMsg = `Codex spawn error: ${err.message}. Is codex installed and in PATH?${hint}`;
+      writeDebugLog('RUNNER', `[codex] SPAWN ERROR group=${group.name} cmd=${resolved.command} err=${err.message} code=${(err as any).code ?? 'unknown'}`);
       logger.error(
         { group: group.name, processId, error: err },
         'Codex agent spawn error',
       );
-      const hint = process.platform === 'win32'
-        ? ` On Windows, run: npm install -g @openai/codex`
-        : '';
       resolveOnce({
         status: 'error',
         result: null,
-        error: `Codex spawn error: ${err.message}. Is codex installed and in PATH?${hint}`,
+        error: errorMsg,
       });
     });
   });
