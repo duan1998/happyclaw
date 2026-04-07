@@ -236,6 +236,12 @@ async function _takeSnapshot(
   }
 
   try {
+    if (!fs.existsSync(workDir)) {
+      fs.mkdirSync(workDir, { recursive: true });
+      writeDebugLog(TAG, `takeSnapshot: created missing workDir for ${folder}: ${workDir}`);
+    }
+
+    writeDebugLog(TAG, `takeSnapshot: git add -A for ${folder} gitDir=${gitDir} workDir=${workDir}`);
     await gitCmd(gitDir, workDir, ['add', '-A']);
 
     const diffCheck = await gitCmdAllowFailure(gitDir, workDir, [
@@ -244,11 +250,24 @@ async function _takeSnapshot(
       '--quiet',
     ]);
     const hasChanges = diffCheck.exitCode !== 0;
+    writeDebugLog(TAG, `takeSnapshot: diffCheck exitCode=${diffCheck.exitCode} hasChanges=${hasChanges} folder=${folder}`);
 
     if (hasChanges) {
       const msg = `${label} @ ${new Date().toISOString()}`;
       await gitCmd(gitDir, workDir, ['commit', '-m', msg]);
+      writeDebugLog(TAG, `takeSnapshot: committed for ${folder} (${label})`);
     } else {
+      // In a freshly initialized repo with no commits, HEAD doesn't exist yet.
+      // Return null instead of failing on `git rev-parse HEAD`.
+      const headCheck = await gitCmdAllowFailure(gitDir, workDir, ['rev-parse', 'HEAD']);
+      if (headCheck.exitCode !== 0) {
+        const ms = Date.now() - t0;
+        writeDebugLog(
+          TAG,
+          `takeSnapshot: no changes and no commits yet for ${folder} (${label}) ${ms}ms headStderr=${(headCheck.stderr || '').trim().slice(0, 200)}`,
+        );
+        return null;
+      }
       writeDebugLog(
         TAG,
         `takeSnapshot: no changes, returning current HEAD for ${folder} (${label})`,
@@ -267,7 +286,7 @@ async function _takeSnapshot(
     const ms = Date.now() - t0;
     writeDebugLog(
       TAG,
-      `takeSnapshot FAIL: folder=${folder} label=${label} ${ms}ms err=${err.message}`,
+      `takeSnapshot FAIL: folder=${folder} label=${label} ${ms}ms err=${err.message}\n  stack=${err.stack?.split('\n').slice(0, 3).join(' | ')}`,
     );
     logger.error({ err, folder, label }, 'takeSnapshot failed');
     return null;
